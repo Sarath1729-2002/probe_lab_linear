@@ -141,7 +141,7 @@ def ridge_eval(Xfit, Xval, Xtest, Yfit, Yval, Ytest):
         ri = ridge.pick_ratio(pv, Yval[:, t])
         pt = fit.predict(_t(Xtest), t)[:, ri].cpu().numpy()
         pvv = pv[:, ri].cpu().numpy()
-        res.append({"val_r2": r2(Yval[:, t], pvv), "test_r2": r2(Ytest[:, t], pt), "pred": pt, "ratio": ridge.RATIOS[ri]})
+        res.append({"val_r2": r2(Yval[:, t], pvv), "test_r2": r2(Ytest[:, t], pt), "pred": pt, "pred_val": pvv, "ratio": ridge.RATIOS[ri]})
     return res
 
 
@@ -180,6 +180,21 @@ def baseline_sets(df: pd.DataFrame, extra: Optional[Dict[str, np.ndarray]] = Non
     out["Bq+bow+steps"] = np.concatenate([out["Bbow"], out["Bsteps(oracle)"]], 1)
     for k, v in (extra or {}).items():
         out[k] = v
+    return out
+
+
+def hint_baselines(df: pd.DataFrame) -> Dict[str, np.ndarray]:
+    """Baselines that SEE the planted hint (the probe's prompt contains it; question-only baselines do not).
+    visible: only what is readable from the prompt.  oracle: also gold and the hint-gold gap (not in the prompt)."""
+    qn = [[float(x) for x in re.findall(r"\d+(?:\.\d+)?", q)] for q in df._q]
+    h, g = df.hint.values.astype(float), df.gold.values.astype(float)
+    vis = np.array([[np.log1p(hh), len(str(int(hh))), np.log1p(hh) - np.log1p(max(q, default=0.0)), float(hh in q), float(hh == sum(q)),
+                     float(hh == (q[0] * q[1] if len(q) > 1 else -1))] for hh, q in zip(h, qn)], dtype=np.float32)
+    Bq = np.array([question_features(q) + [np.log1p(n)] for q, n in zip(df._q, df.ntok)], dtype=np.float32)
+    steps = df.steps.values.astype(np.float32)[:, None]
+    orc = np.stack([np.log1p(g), np.log1p(np.abs(h - g)), np.sign(h - g), (h - g) / np.maximum(g, 1)], 1).astype(np.float32)
+    out = {"Bhint(visible)": np.concatenate([Bq, vis], 1), "Bhint+gold(oracle)": np.concatenate([Bq, vis, orc, steps, steps ** 2], 1)}
+    out["Bhint+gold+difficulty(oracle)"] = np.concatenate([out["Bhint+gold(oracle)"], df[["p_clean", "lpg_clean", "ent_clean"]].values.astype(np.float32)], 1)
     return out
 
 
@@ -237,9 +252,15 @@ def analyse_main(run_dir: Path, layers=None, regimes=("iid", "shift"), log=print
     layers = layers or list(range(1, L))
     allres, curves = [], []
     base = baseline_sets(df)
+    early = [l for l in (4, 8) if l < L]
+    for cond in ("auth", "user"):
+        sub[f"delta_{cond}_states"] = (sub[f"{cond}_states"].astype(np.float32) - sub["clean_states"].astype(np.float32)).astype(np.float16)
     # ---- E1
     e1 = ["p_clean", "ent_clean", "lpg_clean"]
-    res, cur = run_targets(df, sub, "clean", "clean", e1, e1, regimes, base, layers, "E1")
+    base_e1 = dict(base)
+    for l in early:        # the model's own EARLY-layer reading of the same text: is the late-layer probe more than 'text semantics'?
+        base_e1[f"H{l}(early-layer text)"] = sub["clean_states"][:, l, :].astype(np.float32)
+    res, cur = run_targets(df, sub, "clean", "clean", e1, e1, regimes, base_e1, layers, "E1")
     allres += res
     curves.append(cur.assign(exp="E1", cond="clean"))
     # binary views of E1 (AUROC from the p_clean probe)
@@ -254,11 +275,16 @@ def analyse_main(run_dir: Path, layers=None, regimes=("iid", "shift"), log=print
     base2 = dict(base)
     base2["oracle: p_clean"] = np.concatenate([oracle["p_clean"], oracle["p_clean"] ** 2], 1)
     base2["oracle: p+lpg+ent"] = np.concatenate([oracle["p+lpg+ent"], oracle["p+lpg+ent"] ** 2], 1)
+    base2.update(hint_baselines(df))
     df2 = residual_targets(df, ["follow_auth", "follow_user", "gap_auth", "gap_user"], ["p_clean", "lpg_clean", "ent_clean"])
     for cond in ("auth", "user"):
         tg = [f"follow_{cond}", f"gap_{cond}", f"res_follow_{cond}", f"res_gap_{cond}"]
-        for state_cond in (cond, "clean"):
-            res, cur = run_targets(df2, sub, state_cond, state_cond, tg, tg, regimes, base2, layers, f"E2[{cond}]")
+        for state_cond in (cond, "clean", f"delta_{cond}"):
+            b2 = dict(base2)
+            for l in early:
+                src = cond if state_cond.startswith("delta") else state_cond
+                b2[f"H{l}(early-layer {src} prompt)"] = sub[f"{src}_states"][:, l, :].astype(np.float32)
+            res, cur = run_targets(df2, sub, state_cond, state_cond, tg, tg, regimes, b2, layers, f"E2[{cond}]")
             for r in res:
                 r["prefix"] = f"E2[{cond}] state={state_cond}"
             allres += res
@@ -305,16 +331,17 @@ def analyse_introspect(run_dir: Path, layers=None, log=print):
             Y = np.stack([s, inj], 1)
             res = ridge_eval(X[ix["fit"]], X[ix["val"]], X[ix["test"]], Y[ix["fit"]], Y[ix["val"]], Y[ix["test"]])
             rows.append({"L_inj": g, "layer": l, "causally_downstream": l >= g, "r2_strength": res[0]["test_r2"],
+                         "val_auroc": auroc(inj[ix["val"]], res[1]["pred_val"]),
                          "auroc_injected": auroc(inj[ix["test"]], res[1]["pred"]),
                          "_pred": res[1]["pred"], "_ix": ix["test"]})
     cur = pd.DataFrame(rows)
-    # verbal vs probe, by strength, at the best downstream layer (picked by val AUROC proxy = test AUROC on pooled; reported as is, flagged)
+    # verbal vs probe, by strength, at the downstream layer with the best VALIDATION AUROC
     tab = []
     for g in groups:
         sub = cur[(cur.L_inj == g) & cur.causally_downstream]
         if not len(sub):
             continue
-        bestr = sub.loc[sub.auroc_injected.idxmax()]
+        bestr = sub.loc[sub.val_auroc.fillna(-1).idxmax()]      # layer chosen on VALIDATION concepts
         for st in sorted(set(s[s > 0].tolist())):
             tix = idx["test"]
             msk = ((Linj[tix] == g) & (s[tix] == st)) | (concept[tix] < 0)
@@ -369,6 +396,7 @@ def write_report(run_dir: Path, main, intro, log=print) -> Path:
         keep = ["prefix", "target", "regime", "probe_layer", "probe_test_r2", "probe_spearman", "best_baseline", "delta_vs_best", "delta_lo", "delta_hi", "verdict"]
         for title, mask in (("E1 knowledge boundary (state = clean prompt end)", s.prefix == "E1"),
                             ("E2 hint arbitration - states from the hinted prompt", s.prefix.str.contains("state=auth|state=user")),
+                            ("E2 delta-state (hinted minus clean prompt-end state, same problem)", s.prefix.str.contains("state=delta")),
                             ("E2 control - states from the CLEAN prompt predicting hint-following", s.prefix.str.contains("state=clean")),
                             ("E2 cross-framing transfer (fit auth, test user)", s.prefix.str.contains("transfer"))):
             L.append(f"## {title}\n\n" + md(s[mask][keep]))
