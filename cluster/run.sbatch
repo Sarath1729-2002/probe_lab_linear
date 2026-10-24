@@ -1,5 +1,5 @@
 #!/bin/bash
-# STAGE = sample | states | introspect | analyze   (sample/states: 1 process per GPU, resumable chunks)
+# STAGE = sample | states | introspect | analyze | analyze3 | steer | report3   (sample/states: 1 process per GPU, resumable chunks)
 #SBATCH --job-name=plab
 #SBATCH --nodes=1
 #SBATCH --ntasks-per-node=1
@@ -35,11 +35,11 @@ run_sharded() {
 case "${STAGE:?set STAGE}" in
 states)
   notify "states STARTED"
-  run_sharded states --run-dir "$RUN_DIR" --model-id "$MODEL_ID" --fwd-bs "$FWD_BS" ${LIM[@]+"${LIM[@]}"}
+  run_sharded states --run-dir "$RUN_DIR" --model-id "$MODEL_ID" --fwd-bs "$FWD_BS" --conds "$CONDS_RUN" --tag "$TAG" ${LIM[@]+"${LIM[@]}"}
   notify "states DONE in $(elapsed)" ;;
 sample)
   notify "sample STARTED" "N=$N_SAMPLES per condition"
-  run_sharded sample --run-dir "$RUN_DIR" --model-id "$MODEL_ID" --n "$N_SAMPLES" --max-new "$MAX_NEW" --temperature "$TEMP" --top-p "$TOP_P" --chunk "$CHUNK" --max-seqs "$MAX_SEQS" ${LIM[@]+"${LIM[@]}"}
+  run_sharded sample --run-dir "$RUN_DIR" --model-id "$MODEL_ID" --n "$N_SAMPLES" --max-new "$MAX_NEW" --temperature "$TEMP" --top-p "$TOP_P" --chunk "$CHUNK" --max-seqs "$MAX_SEQS" --conds "$CONDS_RUN" --tag "$TAG" ${LIM[@]+"${LIM[@]}"}
   notify "sample DONE in $(elapsed)" ;;
 introspect)
   CUDA_VISIBLE_DEVICES=0 python -m plab.cli introspect --run-dir "$RUN_DIR" --model-id "$MODEL_ID"
@@ -47,5 +47,15 @@ introspect)
 analyze)
   python -m plab.cli analyze --run-dir "$RUN_DIR"
   notify "ANALYSIS ready" "$(sed -n 1,60p "$RUN_DIR/analysis/report.md" | cut -c1-220)" ;;
+analyze3)
+  python -m plab.cli analyze3 --run-dir "$RUN_DIR" --part compute
+  notify "analysis (compute) DONE in $(elapsed)" "$(cat "$RUN_DIR/analysis_v3/directions.json")" ;;
+steer)
+  notify "steer STARTED" "n=$STEER_N problems"
+  run_sharded steer --run-dir "$RUN_DIR" --model-id "$MODEL_ID" --steer-n "$STEER_N" --max-seqs "$MAX_SEQS"
+  notify "steer DONE in $(elapsed)" ;;
+report3)
+  python -m plab.cli analyze3 --run-dir "$RUN_DIR" --part report
+  notify "REPORT ready" "$(sed -n 1,25p "$RUN_DIR/analysis_v3/REPORT.md" | cut -c1-260)" ;;
 *) echo "unknown STAGE"; exit 2 ;;
 esac

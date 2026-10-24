@@ -17,6 +17,9 @@ export CHUNK="${CHUNK:-64}"
 export MAX_SEQS="${MAX_SEQS:-192}"             # sequences per generate() call per GPU (H100 80GB)
 export FWD_BS="${FWD_BS:-8}"
 export GATE_N="${GATE_N:-240}"
+export CONDS_RUN="${CONDS_RUN:-}"             # comma list of conditions for states/sample (empty = all 8)
+export TAG="${TAG:-}"                          # file-name tag so new conditions do not collide with finished chunks
+export STEER_N="${STEER_N:-400}"               # held-out problems used by the steering experiment
 
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}" HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}" TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
 export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1

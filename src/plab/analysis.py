@@ -37,6 +37,9 @@ def load_states(run_dir: Path, conds) -> Optional[dict]:
     if not files:
         return None
     parts = [np.load(f) for f in files]
+    parts = [p for p in parts if all(f"{c}_states" in p.files for c in conds)]
+    if not parts:
+        return None
     ids = np.concatenate([p["ids"] for p in parts])
     order = np.argsort(ids)
     out = {"ids": ids[order]}
@@ -145,13 +148,15 @@ def ridge_eval(Xfit, Xval, Xtest, Yfit, Yval, Ytest):
     return res
 
 
-def sweep(get_fit: Callable[[int], np.ndarray], get_test: Callable[[int], np.ndarray], layers, Yfit, Ytest, fit, val, test, names):
+def sweep(get_fit: Callable[[int], np.ndarray], get_test: Callable[[int], np.ndarray], layers, Yfit, Ytest, fit, val, test, names, allpred=None):
     """-> (DataFrame layer x target, {target: best-layer test predictions})."""
     rows, best = [], {}
     for l in layers:
         Xf, Xt = get_fit(l), get_test(l)
         res = ridge_eval(Xf[fit], Xf[val], Xt[test], Yfit[fit], Yfit[val], Ytest[test])
         for t, r in enumerate(res):
+            if allpred is not None:
+                allpred[(l, names[t])] = r["pred"]
             rows.append({"layer": l, "target": names[t], "val_r2": r["val_r2"], "test_r2": r["test_r2"],
                          "spearman": spearman(Ytest[test][:, t], r["pred"]), "ratio": r["ratio"]})
             if names[t] not in best or (r["val_r2"] > best[names[t]]["val_r2"] if not np.isnan(r["val_r2"]) else False):

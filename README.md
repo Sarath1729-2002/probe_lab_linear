@@ -24,3 +24,21 @@ Knobs (env): `N_SAMPLES=16 MAX_NEW=512 EXTRA_TRAIN=2700 MAX_SEQS=192 SBATCH_ACCO
 
 ## Tests
 `pytest tests` (tiny random Qwen2; checks prompt-end state equals a direct forward, resumability, injection causality, probe recovery).
+
+---
+# Main study (v3): pre-generation readout of hint adoption
+
+**Question.** Does the residual stream at the last prompt token, before any output, linearly encode how likely Qwen2.5-7B-Instruct is to adopt a
+*planted wrong answer*, beyond difficulty and beyond what the prompt text reveals?  Seven graded framings of the same wrong hint
+(`auth user weak peer teacher grader pressure`), 16 sampled solutions per (problem, framing), ~4000 GSM8K problems.
+
+**Metrics (declared up front)** M1 R2/Spearman of the val-selected best-layer ridge probe; M2 delta-R2 vs the best baseline (paired bootstrap 95% CI; PASS = CI>0 and R2>0.05, on
+both the iid and the step-shift split); M3 AUROC for "adopts" (rate>=0.25); M4 leave-one-framing-out R2; M5 steering dose-response vs random directions.
+Full layer sweep (all 28 layers, CI band), baseline ladder (question features, bag of words, step-count oracle, measured-difficulty oracle, hint-number features, early-layer states,
+other-framing behaviour oracle), label noise ceilings, permutation control.
+
+```bash
+MODE=v3gate bash cluster/submit.sh   # dry run on 240 problems (all 8 conditions, whole chain)  -> ${RUN_DIR}-gate/analysis_v3/REPORT.md
+MODE=v3 bash cluster/submit.sh       # the study: reuses clean/auth/user from the first run, samples the 5 new framings (~5-6 h), analysis, steering, REPORT.md
+```
+Output: `$RUN_DIR/analysis_v3/{REPORT.md, fig*.png, *.csv, directions.npz}`.  Stages: `states -> sample -> analyze3 (compute) -> steer -> report3`.

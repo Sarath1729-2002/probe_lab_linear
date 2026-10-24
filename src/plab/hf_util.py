@@ -11,7 +11,12 @@ def enc(tok, text: str) -> List[int]:
 def load_model(model_id: str, dtype=torch.bfloat16):
     from transformers import AutoModelForCausalLM, AutoTokenizer
     tok = AutoTokenizer.from_pretrained(model_id)
-    model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype, device_map={"": 0} if torch.cuda.is_available() else None)
+    try:
+        model = AutoModelForCausalLM.from_pretrained(model_id, dtype=dtype)
+    except TypeError:                                   # older transformers
+        model = AutoModelForCausalLM.from_pretrained(model_id, torch_dtype=dtype)
+    if torch.cuda.is_available():
+        model = model.to("cuda")                        # no accelerate / device_map needed (one process per GPU)
     return model.eval(), tok
 
 

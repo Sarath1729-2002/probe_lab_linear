@@ -14,7 +14,7 @@ from .hf_util import enc, hidden_and_logprobs, pad_id
 from .prompts import CONDS, CUE, chat_prompt, user_text
 
 
-def run(problems, model, tok, out_dir: Path, shard=0, nshards=1, conds=CONDS, fwd_bs=8, chunk=256, log=print) -> int:
+def run(problems, model, tok, out_dir: Path, shard=0, nshards=1, conds=CONDS, fwd_bs=8, chunk=256, tag="", log=print) -> int:
     d = Path(out_dir) / "states"
     d.mkdir(parents=True, exist_ok=True)
     mine = [p for p in problems if p["id"] % nshards == shard]
@@ -22,7 +22,7 @@ def run(problems, model, tok, out_dir: Path, shard=0, nshards=1, conds=CONDS, fw
     cue_ids = enc(tok, CUE)
     done = 0
     for k in range(0, len(mine), chunk):
-        f = d / f"x{shard:02d}_{k // chunk:05d}.npz"
+        f = d / f"x{shard:02d}{tag}_{k // chunk:05d}.npz"
         if f.exists():
             continue
         batch = mine[k:k + chunk]

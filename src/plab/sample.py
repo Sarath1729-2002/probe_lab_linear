@@ -18,13 +18,13 @@ def answer_entropy(answers: List) -> float:
 
 
 def run(problems, model, tok, out_dir: Path, shard=0, nshards=1, conds=CONDS, n=16, max_new=512, temperature=0.7, top_p=0.95,
-        chunk=64, max_seqs=128, log=print) -> int:
+        chunk=64, max_seqs=128, tag="", log=print) -> int:
     d = Path(out_dir) / "samples"
     d.mkdir(parents=True, exist_ok=True)
     mine = [p for p in problems if p["id"] % nshards == shard]
     done = 0
     for k in range(0, len(mine), chunk):
-        f = d / f"s{shard:02d}_{k // chunk:05d}.jsonl"
+        f = d / f"s{shard:02d}{tag}_{k // chunk:05d}.jsonl"
         if f.exists():
             continue
         batch = mine[k:k + chunk]
