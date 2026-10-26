@@ -31,3 +31,8 @@ where `<RUN_DIR>` is `$SCRATCH/psuite/outputs/qwen7b-psuite`.
 `src/psuite`: `bench.py` (datasets + ground-truth audit), `verify.py` (constraints and their verifiers), `prompts.py`, `hf_util.py`, `gen.py`, `states.py`, `trace.py`, `table.py` (labels + baseline ladders),
 `probes.py`, `study.py`, `report.py`, `core.py`/`ridge.py` (probe machinery), `cli.py`. `tests/`: verifier tests, a tiny-model end-to-end test that checks the forced log-probs and the
 causality of the stored states against direct forwards, and planted-signal tests of the analysis (including a signal that does NOT generalise and must not be scored SUPPORTED).
+
+
+## Uncertainty POC (added)
+Linear probes for answer-distribution uncertainty (pass rate / answer entropy / majority share from rollouts, at the prompt end and after 48 / 96 tokens of the greedy solution), with split-half label reliability, positive controls and a decision rule written in advance.
+`docs/UNCERTAINTY_POC.md` has the design and the rule. Run after the main study: `MODE=unc bash cluster/submit.sh` (smoke: `UNC_N=40 MODE=unc ...`), read `$RUN_DIR/unc_n400/analysis/UNC_REPORT.md`.

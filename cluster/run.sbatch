@@ -24,6 +24,7 @@ elapsed() { printf '%dh%02dm' $(((SECONDS - T0) / 3600)) $((((SECONDS - T0) % 36
 LIM=(); [[ -n "${GATE:-}" ]] && LIM=(--limit "$GATE_LIMIT")
 DS=(); [[ -n "${DATASETS:-}" ]] && DS=(--datasets "$DATASETS")
 BUDGET_S="$(python3 -c "print(int(float('${GEN_BUDGET_H}')*3600))")"
+UNC_BUDGET_S="$(python3 -c "print(int(float('${UNC_BUDGET_H}')*3600))")"
 run_sharded() {
   local n i rc=0 pids=()
   n="$(nvidia-smi -L | wc -l)"
@@ -62,6 +63,13 @@ analyze)
   rc=0; for p in "${pids[@]}"; do wait "$p" || rc=1; done
   [[ $rc == 0 ]] || { notify "analysis: a block FAILED"; exit 1; }
   notify "analysis DONE in $(elapsed)" ;;
+unc-roll)
+  notify "unc-roll STARTED" "n=${UNC_N}/dataset, ${N_ROLL} rollouts, ${N_CONT} continuations at o48/o96, budget ${UNC_BUDGET_H}h"
+  run_sharded unc-roll --run-dir "$RUN_DIR" --model-id "$MODEL_ID" --unc-n "$UNC_N" --n-roll "$N_ROLL" --n-cont "$N_CONT" --max-seqs "$MAX_SEQS" --budget-s "$UNC_BUDGET_S"
+  notify "unc-roll DONE in $(elapsed)" "chunks: $(ls "$RUN_DIR"/unc_n${UNC_N}/u*.jsonl 2>/dev/null | wc -l)" ;;
+unc-analyze)
+  python -m psuite.cli unc-analyze --run-dir "$RUN_DIR" --unc-n "$UNC_N"
+  notify "UNC REPORT ready" "$(sed -n '/## 0. DECISION/,/## 2. Label/p' "$RUN_DIR/unc_n${UNC_N}/analysis/UNC_REPORT.md" | cut -c1-400 | head -n 30)" ;;
 report)
   python -m psuite.cli report --run-dir "$RUN_DIR"
   notify "REPORT ready" "$(sed -n '/## 3. Scorecard/,/## 4/p' "$RUN_DIR/analysis/REPORT.md" | cut -c1-300 | head -n 40)" ;;

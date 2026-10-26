@@ -6,6 +6,8 @@
 #   MODE=rescue  RESCUE_SHARD=2 bash cluster/submit.sh   # a shard crashed: finish ITS leftover gen chunks on all 4 GPUs, then trace -> analyze -> report
 #   MODE=analyze bash cluster/submit.sh   # re-run analysis + report on what exists
 #   MODE=report  bash cluster/submit.sh   # just rebuild REPORT.md from the analysis pickles
+#   MODE=unc     bash cluster/submit.sh   # UNCERTAINTY POC (needs the finished main run): rollouts on 4 GPUs -> analysis on 1 GPU -> $RUN_DIR/unc_n$UNC_N/analysis/UNC_REPORT.md
+#   MODE=unc-analyze bash cluster/submit.sh   # redo only the POC analysis + report
 set -euo pipefail
 cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.."
 source cluster/config.sh
@@ -39,6 +41,13 @@ analyze)
   an=$(sub analyze 04:00:00 "" "${NODE[@]}"); rp=$(sub report 00:30:00 "$an" "${NODE[@]}") ;;
 report)
   rp=$(sub report 00:30:00 "" "${NODE[@]}") ;;
+unc)
+  ur=$(sub unc-roll "$(python3 -c "h=float('${UNC_BUDGET_H}')+0.5;print('%02d:%02d:00'%(int(h),int((h-int(h))*60)))")" "" "${NODE[@]}")
+  ua=$(sub unc-analyze 01:00:00 "$ur" "${NODE[@]}"); st="$ur"; ge="$ua"
+  echo "unc: roll=$ur analyze=$ua -> $RUN_DIR/unc_n${UNC_N}/analysis/UNC_REPORT.md"; notify "unc SUBMITTED" "roll=$ur analyze=$ua"; exit 0 ;;
+unc-analyze)
+  ua=$(sub unc-analyze 01:00:00 "" "${NODE[@]}")
+  echo "unc-analyze: $ua -> $RUN_DIR/unc_n${UNC_N}/analysis/UNC_REPORT.md"; exit 0 ;;
 *) echo "unknown MODE"; exit 2 ;;
 esac
 echo "$MODE: states=$st gen=$ge trace=$tr analyze=$an report=$rp   -> $RUN_DIR/analysis/REPORT.md   (squeue -u \$USER)"

@@ -59,7 +59,7 @@ def generate_ids(model, tok, prompts: List[str], max_new: int, n: int = 1, tempe
     while i < len(order):
         idx = order[i:i + bs]
         try:
-            seqs = [enc(tok, prompts[j]) for j in idx]
+            seqs = [enc(tok, prompts[j]) if isinstance(prompts[j], str) else list(prompts[j]) for j in idx]      # a prompt is a string or ready-made token ids (continuations)
             ids, att = left_pad(seqs, pad_id(tok), dev)
             kw = dict(do_sample=temperature > 0, max_new_tokens=max_new, num_return_sequences=n, pad_token_id=pad_id(tok), repetition_penalty=1.0)   # Qwen's generation_config ships a 1.05 penalty: off, so 'greedy' is greedy
             if temperature > 0:
@@ -88,6 +88,27 @@ def generate_ids(model, tok, prompts: List[str], max_new: int, n: int = 1, tempe
                 raise
             bs = max(1, bs // 2)
     return out
+
+
+@torch.no_grad()
+def completion_entropy(model, seq: List[int], start: int, chunk: int = 256):
+    """one teacher-forced pass over seq (prompt + completion): per-token entropy (nats) of the model's next-token distribution and NLL of the token actually
+    taken, for the completion positions seq[start:].  -> (entropy [T], nll [T]) numpy float32."""
+    import numpy as np
+    dev = next(model.parameters()).device
+    ids = torch.tensor([seq], device=dev)
+    base = getattr(model, "model", model)
+    h = base(input_ids=ids).last_hidden_state[0, start - 1: len(seq) - 1]
+    head = model.lm_head if hasattr(model, "lm_head") else model.get_output_embeddings()
+    tgt = torch.tensor(seq[start:], device=dev)
+    ent, nll = [], []
+    for i in range(0, h.shape[0], chunk):
+        lp = torch.log_softmax(head(h[i:i + chunk]).float(), dim=-1)
+        ent.append((-(lp.exp() * lp).sum(-1)).cpu())
+        nll.append((-lp.gather(1, tgt[i:i + chunk, None])[:, 0]).cpu())
+    if not ent:
+        return np.zeros(0, np.float32), np.zeros(0, np.float32)
+    return torch.cat(ent).numpy().astype("float32"), torch.cat(nll).numpy().astype("float32")
 
 
 def _right_pad(seqs, pad, dev):

@@ -22,6 +22,10 @@ export FWD_BS="${FWD_BS:-4}"
 export GEN_BUDGET_H="${GEN_BUDGET_H:-5}"       # the gen job stops starting new chunks after this many hours and exits cleanly (datasets interleaved); MODE=resume continues
 export RESCUE_SHARD="${RESCUE_SHARD:-}"        # MODE=rescue: finish ONE crashed shard's leftover chunks using all GPUs
 export ORIG_NSHARDS="${ORIG_NSHARDS:-4}"
+export UNC_N="${UNC_N:-400}"                   # uncertainty POC: problems per dataset (gsm8k, math); output goes to $RUN_DIR/unc_n$UNC_N
+export N_ROLL="${N_ROLL:-16}"                  # prompt-end rollouts per problem
+export N_CONT="${N_CONT:-8}"                   # continuations per checkpoint (o48, o96)
+export UNC_BUDGET_H="${UNC_BUDGET_H:-3}"       # rollout job stops starting new chunks after this many hours (resumable)
 export GATE_LIMIT="${GATE_LIMIT:-64}"          # problems per dataset in MODE=gate
 
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}" HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}" TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"

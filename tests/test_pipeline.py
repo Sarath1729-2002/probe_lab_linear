@@ -233,3 +233,56 @@ def test_cli_stages_end_to_end(tmp_path, tok, model, monkeypatch):
     assert len(list((tmp_path / "gen").glob("g*.jsonl"))) == len(list((tmp_path / "trace").glob("t*.npz"))) > 0 and len(list((tmp_path / "meta").glob("*.json"))) >= 6
     cli.main(["analyze", "--run-dir", str(tmp_path), "--block", "tables"])
     assert len(table.load_gen(tmp_path)) == 140
+    for sh in (0, 1):                                                       # uncertainty POC stage through the CLI (gsm8k only exists here)
+        cli.main(["unc-roll", "--run-dir", str(tmp_path), "--shard", str(sh), "--nshards", "2", "--unc-n", "30", "--n-roll", "3", "--n-cont", "2", "--max-new", "8", "--max-seqs", "16"])
+    assert len(list((tmp_path / "unc_n30").glob("u*.jsonl"))) >= 2
+
+
+# ----------------------------------------------------------------------------- uncertainty POC: sampling stage on the tiny model
+def test_unc_stage(run, tok, model):
+    from psuite import unc, unc_study
+    tmp, problems = run
+    G = table.load_gen(tmp)
+    sub = unc.pick_subset(problems, G, 12)
+    assert len(sub) == 24 and {p["ds"] for p in sub} == {"gsm8k", "math"}
+    assert {p["id"] for p in unc.pick_subset(problems, G, 6)} <= {p["id"] for p in sub}              # nested subsets: n=40 is part of n=400
+    out = tmp / "unc_t"
+    kw = dict(n_roll=4, n_cont=3, max_seqs=16, chunk=5, cps=(2, 3), min_left=1, max_new=10, log=lambda *_: None)
+    for sh in (0, 1):
+        unc.run(sub, G, model, tok, out, sh, 2, **kw)
+    files = sorted(p.name for p in out.glob("u*.jsonl"))
+    unc.run(sub, G, model, tok, out, 0, 2, **kw)
+    assert files == sorted(p.name for p in out.glob("u*.jsonl")) and files                              # resumable: nothing redone
+    rows = unc_study.load_unc(out)
+    assert len(rows) == 24
+    for r in rows.values():
+        assert len(r["roll_ans"]) == len(r["roll_fin"]) == len(r["roll_ntok"]) == 4 and max(r["roll_ntok"]) <= 10
+        for t in (2, 3):                                           # a continuation exists exactly where the checkpoint is valid
+            assert (str(t) in r["cont"]) == (t <= r["n_greedy"] - 1)
+            if str(t) in r["cont"]:
+                assert len(r["cont"][str(t)]["ans"]) == 3
+    # per-token entropy of the greedy solution == a direct forward
+    checked = 0
+    for p in sub:
+        comp = G[p["id"]]["plain_ids"]
+        if len(comp) < 3:
+            continue
+        pr = enc(tok, chat_prompt(tok, plain_text(p)))
+        with torch.no_grad():
+            lg = model(input_ids=torch.tensor([pr + comp])).logits[0, len(pr) - 1:-1].float()
+        lp = torch.log_softmax(lg, -1)
+        ent = -(lp.exp() * lp).sum(-1)
+        nll = -lp.gather(1, torch.tensor(comp)[:, None])[:, 0]
+        r = rows[p["id"]]
+        assert abs(r["ent_all"] - float(ent.mean())) < 1e-3 and abs(r["nll_all"] - float(nll.mean())) < 1e-3
+        if len(comp) >= 3:
+            assert abs(r["ent2"] - float(ent[:2].mean())) < 1e-3 and abs(r["ent3"] - float(ent[:3].mean())) < 1e-3
+        checked += 1
+    assert checked > 5
+    # a continuation prompt given as token ids is the same prompt as the string (greedy => identical)
+    p = sub[0]
+    s = chat_prompt(tok, plain_text(p))
+    a = generate_ids(model, tok, [s], 6, 1, 0.0)[0][0]
+    b = generate_ids(model, tok, [enc(tok, s)], 6, 1, 0.0)[0][0]
+    assert a == b
+

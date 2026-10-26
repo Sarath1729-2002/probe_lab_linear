@@ -20,7 +20,7 @@ def _write_meta(run: Path, a):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["data", "gen", "states", "trace", "analyze", "report"])
+    ap.add_argument("cmd", choices=["data", "gen", "states", "trace", "analyze", "report", "unc-roll", "unc-analyze"])
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--model-id", default="Qwen/Qwen2.5-7B-Instruct")
     ap.add_argument("--shard", type=int, default=0)
@@ -37,6 +37,9 @@ def main(argv=None):
     ap.add_argument("--sub", default="", help="w/W: take every W-th chunk of this shard (rescue mode)")
     ap.add_argument("--block", default="P", help="analysis block: P, C, K, tables")
     ap.add_argument("--sizes", default="")
+    ap.add_argument("--unc-n", type=int, default=400, help="uncertainty POC: problems per dataset (gsm8k, math)")
+    ap.add_argument("--n-roll", type=int, default=16, help="uncertainty POC: prompt-end rollouts per problem")
+    ap.add_argument("--n-cont", type=int, default=8, help="uncertainty POC: continuations per checkpoint (o48, o96)")
     a = ap.parse_args(argv)
     run = Path(a.run_dir)
     dss = tuple(x for x in a.datasets.split(",") if x) or None
@@ -52,6 +55,12 @@ def main(argv=None):
         from . import report
         report.write(run)
         return
+    unc_dir = run / f"unc_n{a.unc_n}"
+    if a.cmd == "unc-analyze":
+        from . import unc_study
+        unc_study.compute(run, unc_dir)
+        unc_study.write(unc_dir)
+        return
     from .bench import read_problems
     from .hf_util import load_model
     _write_meta(run, a)
@@ -64,7 +73,12 @@ def main(argv=None):
             if cnt[p["ds"]] <= a.limit:
                 keep.append(p)
         problems = keep
-    if a.cmd == "gen":
+    if a.cmd == "unc-roll":
+        from . import table, unc
+        G = table.load_gen(run)
+        sub = unc.pick_subset(problems, G, a.unc_n)
+        unc.run(sub, G, model, tok, unc_dir, a.shard, a.nshards, n_roll=a.n_roll, n_cont=a.n_cont, max_seqs=a.max_seqs, max_new=a.max_new, budget_s=a.budget_s)
+    elif a.cmd == "gen":
         from . import gen
         gen.run(problems, model, tok, run, a.shard, a.nshards, chunk=a.chunk, max_new=a.max_new, n_spread=a.n_spread, max_seqs=a.max_seqs, tag=a.tag, budget_s=a.budget_s, sub=a.sub)
     elif a.cmd == "states":
