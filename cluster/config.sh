@@ -26,6 +26,17 @@ export UNC_N="${UNC_N:-400}"                   # uncertainty POC: problems per d
 export N_ROLL="${N_ROLL:-16}"                  # prompt-end rollouts per problem
 export N_CONT="${N_CONT:-8}"                   # continuations per checkpoint (o48, o96)
 export UNC_BUDGET_H="${UNC_BUDGET_H:-3}"       # rollout job stops starting new chunks after this many hours (resumable)
+# ---- mega run (GSM8K only; four independent threads, see docs/MEGA.md) ----
+export MEGA_DIR="${MEGA_DIR:-$RUN_DIR/mega}"
+export MEGA_STEPS_H="${MEGA_STEPS_H:-4}"       # budget (hours) of the step-edit generation job; resumable, a cut-off leaves a random subset of problems
+export MEGA_UNC_H="${MEGA_UNC_H:-3}"           # budget of the uncertainty rollout job
+export MEGA_STEER_H="${MEGA_STEER_H:-2}"       # budget of the steering job
+export MEGA_UNC_N="${MEGA_UNC_N:-2000}"        # unseen GSM8K problems for the uncertainty thread (the 400 from the POC are skipped)
+export MEGA_UNC_SKIP="${MEGA_UNC_SKIP:-400}"
+export MEGA_N_ROLL="${MEGA_N_ROLL:-16}"
+export MEGA_MAX_STEPS="${MEGA_MAX_STEPS:-8}"   # numeric steps edited per solution
+export MEGA_CHUNK="${MEGA_CHUNK:-8}"           # problems per resumable chunk in the steps thread
+export MEGA_STEER_N="${MEGA_STEER_N:-0}"       # 0 = all GSM8K test problems
 export GATE_LIMIT="${GATE_LIMIT:-64}"          # problems per dataset in MODE=gate
 
 export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}" HF_DATASETS_OFFLINE="${HF_DATASETS_OFFLINE:-1}" TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"

@@ -20,7 +20,7 @@ def sim(gold, q, n, rng):
     return [gold if rng.rand() < q else str(int(gold) + int(rng.randint(1, 4))) for _ in range(n)]
 
 
-def fabricate_unc(tmp, planted=True, seed=3, n_roll=16, n_cont=8):
+def fabricate_unc(tmp, planted=True, seed=3, n_roll=16, n_cont=8, n=250):
     fabricate(tmp)
     rng = np.random.RandomState(seed)
     probs = bench.read_problems(tmp)
@@ -56,8 +56,8 @@ def fabricate_unc(tmp, planted=True, seed=3, n_roll=16, n_cont=8):
         for r in rows:
             f.write(json.dumps(r) + "\n")
     G = table.load_gen(tmp)
-    sub = unc.pick_subset(probs, G, 250)
-    out = tmp / "unc_n250"
+    sub = unc.pick_subset(probs, G, n)
+    out = tmp / f"unc_n{n}"
     out.mkdir()
     with open(out / "u00_all_0000.jsonl", "w") as f:
         for p in sub:

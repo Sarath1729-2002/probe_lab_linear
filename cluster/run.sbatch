@@ -70,6 +70,24 @@ unc-roll)
 unc-analyze)
   python -m psuite.cli unc-analyze --run-dir "$RUN_DIR" --unc-n "$UNC_N"
   notify "UNC REPORT ready" "$(sed -n '/## 0. DECISION/,/## 2. Label/p' "$RUN_DIR/unc_n${UNC_N}/analysis/UNC_REPORT.md" | cut -c1-400 | head -n 30)" ;;
+mega-steps)
+  notify "mega-steps STARTED" "edit + regenerate numeric steps, budget ${MEGA_STEPS_H}h"
+  run_sharded steps --run-dir "$RUN_DIR" --mega-dir "$MEGA_DIR" --model-id "$MODEL_ID" --chunk "$MEGA_CHUNK" --max-steps "$MEGA_MAX_STEPS" --max-seqs "$MAX_SEQS" --budget-s "$(python3 -c "print(int(float('${MEGA_STEPS_H}')*3600))")"
+  notify "mega-steps DONE in $(elapsed)" "chunks: $(ls "$MEGA_DIR"/steps/s*.jsonl 2>/dev/null | wc -l)" ;;
+mega-unc)
+  notify "mega-unc STARTED" "${MEGA_UNC_N} unseen GSM8K problems x ${MEGA_N_ROLL} rollouts, budget ${MEGA_UNC_H}h"
+  run_sharded unc-roll --run-dir "$RUN_DIR" --mega-dir "$MEGA_DIR" --model-id "$MODEL_ID" --unc-datasets gsm8k --unc-n "$MEGA_UNC_N" --unc-skip "$MEGA_UNC_SKIP" --n-roll "$MEGA_N_ROLL" --n-cont 0 --max-seqs "$MAX_SEQS" --budget-s "$(python3 -c "print(int(float('${MEGA_UNC_H}')*3600))")"
+  notify "mega-unc DONE in $(elapsed)" "chunks: $(ls "$MEGA_DIR"/unc/u*.jsonl 2>/dev/null | wc -l)" ;;
+mega-steer-prep)
+  CUDA_VISIBLE_DEVICES=0 python -m psuite.cli steer-prep --run-dir "$RUN_DIR" --mega-dir "$MEGA_DIR"
+  notify "mega-steer-prep DONE in $(elapsed)" "$(cat "$MEGA_DIR"/steer/prep.json 2>/dev/null | tr -d '\n' | cut -c1-300)" ;;
+mega-steer-run)
+  notify "mega-steer-run STARTED" "45 conditions on the GSM8K test problems, budget ${MEGA_STEER_H}h"
+  run_sharded steer-run --run-dir "$RUN_DIR" --mega-dir "$MEGA_DIR" --model-id "$MODEL_ID" --max-seqs "$MAX_SEQS" --steer-n "$MEGA_STEER_N" --budget-s "$(python3 -c "print(int(float('${MEGA_STEER_H}')*3600))")"
+  notify "mega-steer-run DONE in $(elapsed)" "conditions: $(ls "$MEGA_DIR"/steer/r*.jsonl 2>/dev/null | wc -l)" ;;
+mega-analyze)
+  CUDA_VISIBLE_DEVICES=0 python -m psuite.cli mega-analyze --run-dir "$RUN_DIR" --mega-dir "$MEGA_DIR"
+  notify "MEGA REPORT ready" "$(sed -n '/## Where to pull/,/## Thread 1/p' "$MEGA_DIR/analysis/MEGA_REPORT.md" | cut -c1-600 | head -n 40)" ;;
 report)
   python -m psuite.cli report --run-dir "$RUN_DIR"
   notify "REPORT ready" "$(sed -n '/## 3. Scorecard/,/## 4/p' "$RUN_DIR/analysis/REPORT.md" | cut -c1-300 | head -n 40)" ;;

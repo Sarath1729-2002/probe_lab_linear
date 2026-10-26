@@ -36,3 +36,7 @@ causality of the stored states against direct forwards, and planted-signal tests
 ## Uncertainty POC (added)
 Linear probes for answer-distribution uncertainty (pass rate / answer entropy / majority share from rollouts, at the prompt end and after 48 / 96 tokens of the greedy solution), with split-half label reliability, positive controls and a decision rule written in advance.
 `docs/UNCERTAINTY_POC.md` has the design and the rule. Run after the main study: `MODE=unc bash cluster/submit.sh` (smoke: `UNC_N=40 MODE=unc ...`), read `$RUN_DIR/unc_n400/analysis/UNC_REPORT.md`.
+
+## Mega run (added)
+One overnight GSM8K-only job with four independent threads (causal step importance by intervention, uncertainty on 2000 unseen problems, steering test of the length direction, corrected re-analysis), corrected CV protocol and pre-registered rules: see `docs/MEGA.md`.
+`MODE=mega-smoke bash cluster/submit.sh` (dry run) then `MODE=mega bash cluster/submit.sh`; report: `$RUN_DIR/mega/analysis/MEGA_REPORT.md`.

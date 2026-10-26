@@ -20,7 +20,7 @@ def _write_meta(run: Path, a):
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("cmd", choices=["data", "gen", "states", "trace", "analyze", "report", "unc-roll", "unc-analyze"])
+    ap.add_argument("cmd", choices=["data", "gen", "states", "trace", "analyze", "report", "unc-roll", "unc-analyze", "steps", "steer-prep", "steer-run", "mega-analyze"])
     ap.add_argument("--run-dir", required=True)
     ap.add_argument("--model-id", default="Qwen/Qwen2.5-7B-Instruct")
     ap.add_argument("--shard", type=int, default=0)
@@ -39,7 +39,13 @@ def main(argv=None):
     ap.add_argument("--sizes", default="")
     ap.add_argument("--unc-n", type=int, default=400, help="uncertainty POC: problems per dataset (gsm8k, math)")
     ap.add_argument("--n-roll", type=int, default=16, help="uncertainty POC: prompt-end rollouts per problem")
-    ap.add_argument("--n-cont", type=int, default=8, help="uncertainty POC: continuations per checkpoint (o48, o96)")
+    ap.add_argument("--n-cont", type=int, default=8, help="uncertainty POC: continuations per checkpoint (o48, o96); 0 = prompt-end rollouts only")
+    ap.add_argument("--unc-datasets", default="gsm8k,math", help="uncertainty rollouts: datasets")
+    ap.add_argument("--unc-skip", type=int, default=0, help="uncertainty rollouts: skip the first N (hash order) problems per dataset - the mega run excludes the 400 problems already analysed")
+    ap.add_argument("--mega-dir", default="", help="mega run output dir (default <run-dir>/mega)")
+    ap.add_argument("--max-steps", type=int, default=8, help="mega steps thread: numeric steps edited per solution")
+    ap.add_argument("--steer-n", type=int, default=0, help="mega steering: only the first N test problems (smoke runs); 0 = all")
+    ap.add_argument("--parts", default="steps,unc,steer,suite", help="mega-analyze: threads to analyse")
     a = ap.parse_args(argv)
     run = Path(a.run_dir)
     dss = tuple(x for x in a.datasets.split(",") if x) or None
@@ -56,6 +62,15 @@ def main(argv=None):
         report.write(run)
         return
     unc_dir = run / f"unc_n{a.unc_n}"
+    mega = Path(a.mega_dir) if a.mega_dir else run / "mega"
+    if a.cmd == "mega-analyze":
+        from . import mega as mg
+        mg.run_all(run, mega, tuple(x for x in a.parts.split(",") if x))
+        return
+    if a.cmd == "steer-prep":
+        from . import steer
+        steer.prep(run, mega / "steer")
+        return
     if a.cmd == "unc-analyze":
         from . import unc_study
         unc_study.compute(run, unc_dir)
@@ -76,8 +91,19 @@ def main(argv=None):
     if a.cmd == "unc-roll":
         from . import table, unc
         G = table.load_gen(run)
-        sub = unc.pick_subset(problems, G, a.unc_n)
-        unc.run(sub, G, model, tok, unc_dir, a.shard, a.nshards, n_roll=a.n_roll, n_cont=a.n_cont, max_seqs=a.max_seqs, max_new=a.max_new, budget_s=a.budget_s)
+        dsn = tuple(x for x in a.unc_datasets.split(",") if x)
+        sub = unc.pick_subset(problems, G, a.unc_n, dsn, a.unc_skip)
+        out_u = (mega / "unc") if a.mega_dir or a.unc_skip else unc_dir
+        unc.run(sub, G, model, tok, out_u, a.shard, a.nshards, n_roll=a.n_roll, n_cont=a.n_cont, cps=unc.CPS if a.n_cont else (), max_seqs=a.max_seqs, max_new=a.max_new, budget_s=a.budget_s)
+    elif a.cmd == "steps":
+        from . import steps, table
+        G = table.load_gen(run, ["gsm8k"])
+        steps.run([p for p in problems if p["ds"] == "gsm8k"], G, model, tok, mega / "steps", a.shard, a.nshards, chunk=a.chunk, max_steps=a.max_steps, max_new=a.max_new or 512, max_seqs=a.max_seqs, budget_s=a.budget_s)
+    elif a.cmd == "steer-run":
+        from . import steer
+        test = [p for p in problems if p["ds"] == "gsm8k" and p["split"] == "test"]
+        test = test[:a.steer_n] if a.steer_n else test
+        steer.run(test, model, tok, mega / "steer", a.shard, a.nshards, max_new=a.max_new or 512, max_seqs=a.max_seqs, budget_s=a.budget_s)
     elif a.cmd == "gen":
         from . import gen
         gen.run(problems, model, tok, run, a.shard, a.nshards, chunk=a.chunk, max_new=a.max_new, n_spread=a.n_spread, max_seqs=a.max_seqs, tag=a.tag, budget_s=a.budget_s, sub=a.sub)

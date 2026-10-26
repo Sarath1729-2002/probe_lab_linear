@@ -23,13 +23,13 @@ MIN_LEFT = 8                    # same validity rule as trace.checkpoint_ts
 POC_DATASETS = ("gsm8k", "math")
 
 
-def pick_subset(problems, G, n_per_ds: int, datasets=POC_DATASETS):
+def pick_subset(problems, G, n_per_ds: int, datasets=POC_DATASETS, skip: int = 0):
     """deterministic: the n problems per dataset with the smallest crc32(id) among those that have a greedy generation.  Nested: n=40 is a subset of n=400."""
     out = []
     for ds in datasets:
         ps = [p for p in problems if p["ds"] == ds and p["id"] in G]
         ps.sort(key=lambda p: zlib.crc32(f"unc{p['id']}".encode()))
-        out += ps[:n_per_ds]
+        out += ps[skip:skip + n_per_ds]
     return sorted(out, key=lambda p: p["id"])
 
 
