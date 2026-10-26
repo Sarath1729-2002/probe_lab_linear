@@ -1,44 +1,33 @@
-# probe_lab
+# model_introspection_probe_suite
 
-Linear (ridge) probes with **regression labels** on **Qwen2.5-7B-Instruct / GSM8K**. Three experiments, one run, all on frozen
-prompt-end hidden states (every layer), all labels deterministic or measured by sampling.
+Linear probes for what a frozen LLM's residual stream knows about its **own continuation**, in the quantities a monitor would act on:
+will it run away, how long, will it obey a constraint, is its answer already settled, how much is left. Every label is a deterministic function of greedy-decoded text
+(plus deterministic verifiers for the constraints), the baselines are explicit ladders, and the scorecard in `REPORT.md` applies pre-declared strict rules (`docs/PROTOCOL.md`).
 
-| | question | label (regression) | bar the probe must beat |
-|---|---|---|---|
-| **E1 knowledge boundary** | from the question alone, does the residual stream encode how likely the model is to solve it? | `p_clean` = fraction of 16 sampled answers correct; `ent_clean` = answer entropy over the 16 (semantic entropy for numeric answers); `lpg_clean` = log P(gold) with no reasoning | question length/numbers, bag-of-words, and an **oracle** that sees the reference-solution step count |
-| **E2 hint arbitration** | with a planted *wrong* answer (answer-key framing / "I worked it out" framing), is *whether the model will follow it* readable before it writes anything? | `follow_*` = fraction of 16 samples ending in the planted answer; `gap_*` = log P(hint) - log P(gold) forced, no CoT; residual versions with clean difficulty regressed out | all of the above **plus oracle clean pass-rate** (does the probe read more than difficulty?); cross-framing transfer auth -> user |
-| **E3 injected-concept readout** | a concept direction is added to the residual stream; can a probe read injection/strength better than the model's own "do you notice an injected thought?" answer? | strength `s` (known), injected (0/1); held-out **concepts** | verbal self-report AUROC; causal null: layers below the injection layer must be ~0.5 |
+Model: Qwen2.5-7B-Instruct. Data: GSM8K, MATH (integer answers), ARC (multiple choice), synthetic arithmetic, each passed through a ground-truth audit (admitted only at >= 99.5% pass).
+No model is trained: the only fitted objects are closed-form ridge probes.
 
-Splits: by problem (70/10/20) and a **shift** regime (train on <=3-step problems, test on >=5-step). E3 splits by concept.
-Probe = per-layer closed-form ridge, lambda by validation MSE, layer by validation R2, test touched once; paired bootstrap CIs.
-`PASS` in the report = CI lower bound of (probe - best baseline) > 0 and probe R2 > 0.05. Nothing is tuned on test.
+## Stages (all resumable; one process per GPU; whole-node jobs)
+`setup.sh` (login node, once) -> `states` (prompt-end states for the plain and the constrained prompt) -> `gen` (greedy plain, greedy constrained, 4 sampled plain solutions)
+-> `trace` (hidden states + forced-answer log-probs at 6 checkpoints along the greedy plain solution) -> `analyze` (blocks P, C, K, tables, one per GPU) -> `report`.
 
-## Run (TamIA)
-```bash
-bash cluster/setup.sh                 # login node: venv, model + GSM8K download, problems.jsonl
-MODE=gate bash cluster/submit.sh      # 240 problems, every stage, report in ${RUN_DIR}-gate/analysis/report.md  (<1h)
-MODE=full bash cluster/submit.sh      # ~4000 problems: states -> sample -> introspect -> analyze (chained, resumable)
-MODE=analyze bash cluster/submit.sh   # re-run only the analysis
+## Run it
 ```
-Knobs (env): `N_SAMPLES=16 MAX_NEW=512 EXTRA_TRAIN=2700 MAX_SEQS=192 SBATCH_ACCOUNT=aip-oberman`. Outputs: `$RUN_DIR/{samples,states,introspect.npz,analysis/report.md}`.
-
-## Tests
-`pytest tests` (tiny random Qwen2; checks prompt-end state equals a direct forward, resumability, injection causality, probe recovery).
-
----
-# Main study (v3): pre-generation readout of hint adoption
-
-**Question.** Does the residual stream at the last prompt token, before any output, linearly encode how likely Qwen2.5-7B-Instruct is to adopt a
-*planted wrong answer*, beyond difficulty and beyond what the prompt text reveals?  Seven graded framings of the same wrong hint
-(`auth user weak peer teacher grader pressure`), 16 sampled solutions per (problem, framing), ~4000 GSM8K problems.
-
-**Metrics (declared up front)** M1 R2/Spearman of the val-selected best-layer ridge probe; M2 delta-R2 vs the best baseline (paired bootstrap 95% CI; PASS = CI>0 and R2>0.05, on
-both the iid and the step-shift split); M3 AUROC for "adopts" (rate>=0.25); M4 leave-one-framing-out R2; M5 steering dose-response vs random directions.
-Full layer sweep (all 28 layers, CI band), baseline ladder (question features, bag of words, step-count oracle, measured-difficulty oracle, hint-number features, early-layer states,
-other-framing behaviour oracle), label noise ceilings, permutation control.
-
-```bash
-MODE=v3gate bash cluster/submit.sh   # dry run on 240 problems (all 8 conditions, whole chain)  -> ${RUN_DIR}-gate/analysis_v3/REPORT.md
-MODE=v3 bash cluster/submit.sh       # the study: reuses clean/auth/user from the first run, samples the 5 new framings (~5-6 h), analysis, steering, REPORT.md
+bash cluster/setup.sh                       # once. Reuses ~/venvs/susc and the cached model if they exist. Refuses to rebuild an existing problem set.
+MODE=gate bash cluster/submit.sh            # optional dry run on 64 problems per dataset
+MODE=full bash cluster/submit.sh            # states -> gen -> trace -> analyze -> report, chained with --dependency=afterok
 ```
-Output: `$RUN_DIR/analysis_v3/{REPORT.md, fig*.png, *.csv, directions.npz}`.  Stages: `states -> sample -> analyze3 (compute) -> steer -> report3`.
+Recovery: `MODE=resume` (gen hit its time budget), `MODE=rescue RESCUE_SHARD=<n>` (one shard crashed: its leftover chunks run on all 4 GPUs, then trace -> analyze -> report), `MODE=analyze`, `MODE=report`.
+Never edit on the cluster and never pull while jobs run.
+
+## Look at the results
+```
+cat <RUN_DIR>/analysis/REPORT.md
+cat <RUN_DIR>/analysis/scorecard.csv
+```
+where `<RUN_DIR>` is `$SCRATCH/psuite/outputs/qwen7b-psuite`.
+
+## Layout
+`src/psuite`: `bench.py` (datasets + ground-truth audit), `verify.py` (constraints and their verifiers), `prompts.py`, `hf_util.py`, `gen.py`, `states.py`, `trace.py`, `table.py` (labels + baseline ladders),
+`probes.py`, `study.py`, `report.py`, `core.py`/`ridge.py` (probe machinery), `cli.py`. `tests/`: verifier tests, a tiny-model end-to-end test that checks the forced log-probs and the
+causality of the stored states against direct forwards, and planted-signal tests of the analysis (including a signal that does NOT generalise and must not be scored SUPPORTED).

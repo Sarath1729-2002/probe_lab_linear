@@ -1,10 +1,11 @@
 #!/bin/bash
 # From the repo root on the login node AFTER  bash cluster/setup.sh
-#   MODE=gate bash cluster/submit.sh    # ~240 problems, all stages + report (<1h): is anything there? READ IT FIRST
-#   MODE=full bash cluster/submit.sh    # states -> sample -> introspect -> analyze  (chained; resubmit is safe: finished chunks are skipped)
-#   MODE=analyze bash cluster/submit.sh # just re-run the first-round analysis
-#   MODE=v3gate bash cluster/submit.sh  # main study on 240 problems, all 8 conditions, whole chain (~3-4 h incl. queue): dry run of everything
-#   MODE=v3 bash cluster/submit.sh      # main study: 5 new framings -> layer sweep + LOFO -> steering -> analysis_v3/REPORT.md
+#   MODE=gate    bash cluster/submit.sh   # optional dry run: GATE_LIMIT problems per dataset, every stage, ~1.5h incl. queue -> ${RUN_DIR}-gate/analysis/REPORT.md
+#   MODE=full    bash cluster/submit.sh   # the study: states -> gen -> trace -> analyze -> report, chained (afterok).  Resubmitting is safe: finished chunks are skipped.
+#   MODE=resume  bash cluster/submit.sh   # continue after the gen time budget cut the run short (gen -> trace -> analyze -> report)
+#   MODE=rescue  RESCUE_SHARD=2 bash cluster/submit.sh   # a shard crashed: finish ITS leftover gen chunks on all 4 GPUs, then trace -> analyze -> report
+#   MODE=analyze bash cluster/submit.sh   # re-run analysis + report on what exists
+#   MODE=report  bash cluster/submit.sh   # just rebuild REPORT.md from the analysis pickles
 set -euo pipefail
 cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.."
 source cluster/config.sh
@@ -14,35 +15,31 @@ COMMON=(--parsable --account="$SBATCH_ACCOUNT" --export=ALL --mem=0)
 [[ -n "$SLACK_EMAIL" ]] && COMMON+=(--mail-user="$SLACK_EMAIL" --mail-type=FAIL,TIME_LIMIT_80)
 sub() { local stage="$1" t="$2" dep="$3"; shift 3
   local d=(); [[ -n "$dep" ]] && d=(--dependency=afterok:"$dep")
-  STAGE="$stage" sbatch "${COMMON[@]}" --job-name="plab-$stage" --time="$t" ${d[@]+"${d[@]}"} "$@" cluster/run.sbatch; }
-ONE=(--gpus-per-node=h100:4 --cpus-per-task=24)   # TamIA allocates whole nodes only
-FOUR=(--gpus-per-node=h100:4 --cpus-per-task=24)
-if [[ "$MODE" == "gate" ]]; then
+  STAGE="$stage" sbatch "${COMMON[@]}" --job-name="psuite-$stage" --time="$t" ${d[@]+"${d[@]}"} "$@" cluster/run.sbatch; }
+NODE=(--gpus-per-node=h100:4 --cpus-per-task=24)   # TamIA allocates whole nodes only
+GEN_T="$(python3 -c "import math;h=float('${GEN_BUDGET_H}')+0.75;print('%02d:%02d:00'%(int(h),int((h-int(h))*60)))")"
+st="-"; ge="-"; tr="-"; an="-"; rp="-"
+case "$MODE" in
+gate)
   export GATE=1
-  st=$(sub states 01:00:00 "" "${FOUR[@]}"); sa=$(sub sample 01:30:00 "$st" "${FOUR[@]}"); it=$(sub introspect 01:00:00 "$sa" "${ONE[@]}")
-  an=$(sub analyze 00:30:00 "$it" "${ONE[@]}")
-  echo "gate: states=$st sample=$sa introspect=$it analyze=$an   -> ${RUN_DIR}-gate/analysis/report.md"; exit 0
-fi
-if [[ "$MODE" == "v3" || "$MODE" == "v3gate" ]]; then
-  # main study: 5 NEW framings (the clean/auth/user data from the first run are reused) -> analysis -> steering -> REPORT.md
-  if [[ "$MODE" == "v3gate" ]]; then
-    export GATE=1 CONDS_RUN="clean,auth,user,weak,peer,teacher,grader,pressure" TAG="_g" STEER_N=60
-    T_ST=01:00:00; T_SA=02:30:00; T_AN=01:00:00; T_SV=01:30:00
-  else
-    export CONDS_RUN="weak,peer,teacher,grader,pressure" TAG="_v3"
-    T_ST=03:00:00; T_SA=14:00:00; T_AN=03:00:00; T_SV=05:00:00
-  fi
-  st=$(sub states "$T_ST" "" "${FOUR[@]}")
-  sa=$(sub sample "$T_SA" "$st" "${FOUR[@]}")
-  an=$(sub analyze3 "$T_AN" "$sa" "${ONE[@]}")
-  sv=$(sub steer "$T_SV" "$an" "${FOUR[@]}")
-  rp=$(sub report3 00:30:00 "$sv" "${ONE[@]}")
-  echo "$MODE: states=$st sample=$sa analyze3=$an steer=$sv report3=$rp   -> ${RUN_DIR}$([[ $MODE == v3gate ]] && echo -gate)/analysis_v3/REPORT.md"
-  notify "$MODE SUBMITTED" "states=$st sample=$sa analyze3=$an steer=$sv report3=$rp"; exit 0
-fi
-if [[ "$MODE" == "analyze" ]]; then an=$(sub analyze 00:45:00 "" "${ONE[@]}"); echo "analyze=$an"; exit 0; fi
-st=$(sub states 03:00:00 "" "${FOUR[@]}")
-sa=$(sub sample 14:00:00 "$st" "${FOUR[@]}")
-it=$(sub introspect 02:00:00 "$sa" "${ONE[@]}")
-an=$(sub analyze 00:45:00 "$it" "${ONE[@]}")
-echo "full: states=$st sample=$sa introspect=$it analyze=$an   (squeue -u \$USER)"; notify "full pipeline SUBMITTED" "states=$st sample=$sa introspect=$it analyze=$an"
+  st=$(sub states 01:00:00 "" "${NODE[@]}"); ge=$(sub gen 02:00:00 "$st" "${NODE[@]}"); tr=$(sub trace 01:00:00 "$ge" "${NODE[@]}")
+  an=$(sub analyze 01:30:00 "$tr" "${NODE[@]}"); rp=$(sub report 00:20:00 "$an" "${NODE[@]}")
+  echo "gate: states=$st gen=$ge trace=$tr analyze=$an report=$rp -> ${RUN_DIR}-gate/analysis/REPORT.md"; exit 0 ;;
+full)
+  st=$(sub states 01:30:00 "" "${NODE[@]}"); ge=$(sub gen "$GEN_T" "$st" "${NODE[@]}"); tr=$(sub trace 03:00:00 "$ge" "${NODE[@]}")
+  an=$(sub analyze 04:00:00 "$tr" "${NODE[@]}"); rp=$(sub report 00:30:00 "$an" "${NODE[@]}") ;;
+resume)
+  ge=$(sub gen "$GEN_T" "" "${NODE[@]}"); tr=$(sub trace 03:00:00 "$ge" "${NODE[@]}")
+  an=$(sub analyze 04:00:00 "$tr" "${NODE[@]}"); rp=$(sub report 00:30:00 "$an" "${NODE[@]}") ;;
+rescue)
+  [[ -n "${RESCUE_SHARD:-}" ]] || { echo "set RESCUE_SHARD=<crashed shard number>"; exit 1; }
+  ge=$(sub gen "$GEN_T" "" "${NODE[@]}"); tr=$(sub trace 03:00:00 "$ge" "${NODE[@]}")
+  an=$(sub analyze 04:00:00 "$tr" "${NODE[@]}"); rp=$(sub report 00:30:00 "$an" "${NODE[@]}") ;;
+analyze)
+  an=$(sub analyze 04:00:00 "" "${NODE[@]}"); rp=$(sub report 00:30:00 "$an" "${NODE[@]}") ;;
+report)
+  rp=$(sub report 00:30:00 "" "${NODE[@]}") ;;
+*) echo "unknown MODE"; exit 2 ;;
+esac
+echo "$MODE: states=$st gen=$ge trace=$tr analyze=$an report=$rp   -> $RUN_DIR/analysis/REPORT.md   (squeue -u \$USER)"
+notify "$MODE SUBMITTED" "states=$st gen=$ge trace=$tr analyze=$an report=$rp"
