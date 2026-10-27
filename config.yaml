@@ -1,0 +1,41 @@
+# Look-through run: one model, GSM8K + MATH-500, a few thousand continuations.
+run_name: look_v1
+out_dir: runs
+seed: 0
+
+model: Qwen/Qwen2.5-7B-Instruct
+# Set true for long-CoT models (e.g. deepseek-ai/DeepSeek-R1-Distill-Qwen-7B): injections then sit
+# inside <think>, and generation budgets below should be raised (clean_max_tokens ~4096).
+reasoning_model: false
+
+data:
+  gsm8k_n: 500          # GSM8K test problems
+  math_n: 250           # MATH-500 problems with numeric answers
+  math_min_level: 2
+
+gen:
+  backend: vllm         # vllm (fast) or hf (fallback)
+  max_model_len: 4096
+  clean_max_tokens: 1024
+  cont_max_tokens: 768
+  n_samples: 4          # sampled runs per item, on top of greedy
+  temperature: 0.7
+  top_p: 0.95
+  gpu_mem: 0.85
+
+inject:
+  max_on: 6             # on-path injections per problem (these can change the answer)
+  max_off: 1            # off-path controls per problem (dead-end values; cannot change it)
+  kinds: [plus_one, times_ten, digit_swap]
+
+extract:
+  dtype: bfloat16
+
+probes:
+  test_frac: 0.2        # held-out problems (all injections of a problem stay together)
+  folds: 5              # grouped CV on the dev split, used to pick layer + regularisation
+  C_grid: [0.001, 0.01, 0.1]
+  alpha_grid: [10, 100, 1000, 10000]
+  layer_stride: 1       # 2 halves probe time if you are in a hurry
+  n_boot: 1000
+  n_jobs: -1
