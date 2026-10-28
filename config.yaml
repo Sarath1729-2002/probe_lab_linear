@@ -1,41 +1,55 @@
-# Look-through run: one model, GSM8K + MATH-500, a few thousand continuations.
-run_name: look_v1
-out_dir: runs
+# Full run (~10-14 h on one TamIA node). See DIRECTION.md for the design and README.md to run.
+run_name: full_v1
+out_dir: ${SCRATCH}/errprop_runs        # large files (activations ~10 GB) live on scratch
+report_dir: reports                     # REPORT.md, figures and tables are copied here (small)
 seed: 0
 
 model: Qwen/Qwen2.5-7B-Instruct
-# Set true for long-CoT models (e.g. deepseek-ai/DeepSeek-R1-Distill-Qwen-7B): injections then sit
-# inside <think>, and generation budgets below should be raised (clean_max_tokens ~4096).
 reasoning_model: false
 
 data:
-  gsm8k_n: 500          # GSM8K test problems
-  math_n: 250           # MATH-500 problems with numeric answers
-  math_min_level: 2
+  gsm8k_n: 1319                         # all of GSM8K test
+  gsm_symbolic: {p1: 600, p2: 400}      # GSM-Symbolic P1/P2: +1 / +2 reasoning clauses
+  math_n: 500                           # MATH-500, numeric answers only (filter keeps ~300-350)
+  math_min_level: 1
+  chains_n: 900                         # synthetic serial chains, depth 3-8 (150 per depth)
+  bbh_n: 400                            # BBH multistep_arithmetic_two format, generated locally
 
 gen:
-  backend: vllm         # vllm (fast) or hf (fallback)
+  backend: vllm
   max_model_len: 4096
   clean_max_tokens: 1024
   cont_max_tokens: 768
-  n_samples: 4          # sampled runs per item, on top of greedy
+  n_samples: 4
   temperature: 0.7
   top_p: 0.95
   gpu_mem: 0.85
 
 inject:
-  max_on: 6             # on-path injections per problem (these can change the answer)
-  max_off: 1            # off-path controls per problem (dead-end values; cannot change it)
-  kinds: [plus_one, times_ten, digit_swap]
+  max_on: 10                            # on-path injections per problem
+  max_off: 2                            # off-path controls per problem
+  kinds: [plus_one, digit_swap, times_ten, random_scale, random_same_digits, copy_operand]
+
+intervene:
+  wait_text: "\n\nWait,"                # appended right after the injected number
 
 extract:
   dtype: bfloat16
 
 probes:
-  test_frac: 0.2        # held-out problems (all injections of a problem stay together)
-  folds: 5              # grouped CV on the dev split, used to pick layer + regularisation
+  test_frac: 0.2
+  folds: 5
   C_grid: [0.001, 0.01, 0.1]
   alpha_grid: [10, 100, 1000, 10000]
-  layer_stride: 1       # 2 halves probe time if you are in a hurry
+  layer_stride: 1
   n_boot: 1000
+  n_perm: 50
+  split_seeds: [0, 1, 2, 3, 4]
   n_jobs: -1
+
+steer:
+  n: 240                                # held-out catchable injections, half FOLLOW / half RECOVER
+  alphas: [-8, -4, 0, 4, 8]             # in units of the probe-direction projection s.d.
+  n_random: 2                           # random directions at +/- max alpha (control)
+  max_new_tokens: 512
+  batch_size: 16

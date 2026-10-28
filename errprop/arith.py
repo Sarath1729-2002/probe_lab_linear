@@ -124,6 +124,24 @@ class Equation:
         return asdict(self)
 
 
+def num_tokens(expr: str) -> list[tuple[int, int, float]]:
+    """Numbers in an expression with their spans, keeping a unary minus ('3 - -4' -> 3, -4)."""
+    out = []
+    for m in _NUM_IN_EXPR.finditer(expr):
+        start, sign = m.start(), 1.0
+        j = m.start() - 1
+        while j >= 0 and expr[j] == " ":
+            j -= 1
+        if j >= 0 and expr[j] == "-":
+            k = j - 1
+            while k >= 0 and expr[k] == " ":
+                k -= 1
+            if k < 0 or expr[k] in "(+-*/":
+                start, sign = j, -1.0
+        out.append((start, m.end(), sign * float(m.group(0))))
+    return out
+
+
 def parse_equations(text: str, offset: int = 0) -> list[Equation]:
     """Find verified `<arithmetic> = <number>` statements in `text`.
 
@@ -144,8 +162,8 @@ def parse_equations(text: str, offset: int = 0) -> list[Equation]:
         lhs = normalise_lhs(seg)
         if not lhs or not re.search(r"[\+\-\*/]", lhs.lstrip("-")):
             continue
-        nums = _NUM_IN_EXPR.findall(lhs)
-        if len(nums) < 2:
+        toks = num_tokens(lhs)
+        if len(toks) < 2:
             continue
         val = safe_eval(lhs)
         if val is None:
@@ -155,7 +173,7 @@ def parse_equations(text: str, offset: int = 0) -> list[Equation]:
         rounded = dec > 0 and abs(round(val, dec) - rhs_val) < 1e-9
         if not (exact or rounded):
             continue
-        eqs.append(Equation(idx=len(eqs), lhs=lhs, operands=[float(n) for n in nums],
+        eqs.append(Equation(idx=len(eqs), lhs=lhs, operands=[t[2] for t in toks],
                             rhs_value=rhs_val, rhs_text=rhs_text,
                             rhs_start=offset + m.start(1), rhs_end=offset + m.end(1)))
     _link(eqs)
@@ -205,10 +223,48 @@ def answer_equation(eqs: list[Equation], answer: float) -> Optional[int]:
 # ----------------------------------------------------------------------------- injection
 
 OPERATORS = ("plus_one", "times_ten", "digit_swap")
+# Full grid. The first three are fixed-type errors (prior work: Jia & Mu 2026, Knowing-Saying 2026,
+# Phan et al. 2026). The last three spread error SIZE and PLAUSIBILITY continuously, so that
+# "which operator" stops being a shortcut for "will it be caught":
+#   random_scale        value * f, f log-uniform in [0.2, 5]          (continuous error size)
+#   random_same_digits  uniform random number with the same digit count (looks plausible)
+#   copy_operand        the result is replaced by one of its own operands ("forgot to compute")
+ALL_OPERATORS = ("plus_one", "digit_swap", "times_ten", "random_scale", "random_same_digits", "copy_operand")
 
 
-def corrupt_value(value: float, text: str, kind: str) -> Optional[float]:
+def corrupt_value(value: float, text: str, kind: str, rng=None, operands=None) -> Optional[float]:
     dec = n_decimals(text)
+    if kind == "random_scale":
+        import math
+        rng = rng or __import__("random").Random(0)
+        for _ in range(20):
+            f = math.exp(rng.uniform(math.log(0.2), math.log(5.0)))
+            if abs(f - 1) < 0.1:
+                continue
+            nv = round(value * f, dec) if dec else float(round(value * f))
+            if nv != value and nv != 0:
+                return nv
+        return None
+    if kind == "random_same_digits":
+        rng = rng or __import__("random").Random(0)
+        if value == 0:
+            return None
+        sign = -1.0 if value < 0 else 1.0
+        ip = int(abs(value))
+        nd = len(str(ip))
+        lo, hi = (1, 9) if nd == 1 else (10 ** (nd - 1), 10 ** nd - 1)
+        for _ in range(20):
+            new_ip = rng.randint(lo, hi)
+            frac = round(rng.random(), dec) if dec else 0.0
+            nv = sign * (round(new_ip + frac, dec) if dec else float(new_ip))
+            if nv != value:
+                return nv
+        return None
+    if kind == "copy_operand":
+        for o in operands or []:
+            if not close(o, value) and o != 0:
+                return float(o)
+        return None
     if kind == "plus_one":
         return value + (1.0 if dec == 0 else 10 ** -dec)
     if kind == "times_ten":
@@ -235,12 +291,10 @@ def propagate(eqs: list[Equation], i: int, new_value: float) -> dict[int, float]
         if not any(p in changed for p in e.parents if p is not None):
             continue
         new_ops = [changed[p] if p in changed else v for v, p in zip(e.operands, e.parents)]
-        it = iter(new_ops)
-
-        def repl(m):
-            return repr(next(it))
-
-        expr = _NUM_IN_EXPR.sub(repl, e.lhs)
+        toks = num_tokens(e.lhs)
+        expr = e.lhs
+        for (s, t, _), v in sorted(zip(toks, new_ops), key=lambda z: -z[0][0]):
+            expr = expr[:s] + f"({v!r})" + expr[t:]
         val = safe_eval(expr)
         if val is None:
             continue
@@ -266,8 +320,10 @@ class Injection:
 
 
 def candidate_injections(eqs: list[Equation], answer: float, question_numbers: list[float],
-                         kinds=OPERATORS) -> list[Injection]:
-    """All clean, unambiguous injections for one trace."""
+                         kinds=OPERATORS, seed: int = 0) -> list[Injection]:
+    """All clean, unambiguous injections for one trace. Random operators are seeded per
+    (seed, equation, operator), so the dataset is reproducible."""
+    import random
     k = answer_equation(eqs, answer)
     if k is None:
         return []
@@ -280,11 +336,14 @@ def candidate_injections(eqs: list[Equation], answer: float, question_numbers: l
         others = [x.rhs_value for x in eqs if x.idx != e.idx] + list(question_numbers)
         if any(close(e.rhs_value, v) for v in others):
             continue
-        for kind in kinds:
-            nv = corrupt_value(e.rhs_value, e.rhs_text, kind)
+        for ki, kind in enumerate(kinds):
+            rng = random.Random(seed * 1_000_003 + e.idx * 101 + ki)
+            nv = corrupt_value(e.rhs_value, e.rhs_text, kind, rng=rng, operands=e.operands)
             if nv is None or close(nv, e.rhs_value):
                 continue
-            if any(close(nv, v) for v in others):
+            # the new value must not collide with another number, except for copy_operand where
+            # the collision is the point (its uptake/horizon metrics are therefore less clean)
+            if kind != "copy_operand" and any(close(nv, v) for v in others):
                 continue
             changed = propagate(eqs, e.idx, nv)
             prop = changed.get(k, answer)
@@ -316,10 +375,15 @@ def select_injections(cands: list[Injection], max_on: int, max_off: int, seed: i
     for c in on:
         by_pos.setdefault(c.eq_idx, []).append(c)
     picked, positions = [], sorted(by_pos)
+    used: dict[str, int] = {}
     while len(picked) < max_on and any(by_pos.values()):
         for p in positions:
             if by_pos[p] and len(picked) < max_on:
-                picked.append(by_pos[p].pop())
+                # take the operator used least so far, so every operator appears at every depth
+                by_pos[p].sort(key=lambda c: (used.get(c.kind, 0), rng.random()))
+                c = by_pos[p].pop(0)
+                used[c.kind] = used.get(c.kind, 0) + 1
+                picked.append(c)
     rng.shuffle(off)
     return picked + off[:max_off]
 

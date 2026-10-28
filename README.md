@@ -1,110 +1,93 @@
 # error_prop_probe
 
 Linear probes for **error propagation in chain of thought**: when a wrong value is written into the
-model's reasoning, can we read off, at that moment, whether the model will follow it, recover
-visibly, or recover silently? The research framing, hypotheses and decision rule are in
-[`DIRECTION.md`](DIRECTION.md). This README is how to run it.
+model's reasoning, does the residual stream at that token predict whether the model will follow it
+or catch it, and can a monitor use that to decide where to intervene? Design, borrowed protocols,
+datasets and the pre-registered decision rule are in [`DIRECTION.md`](DIRECTION.md).
 
-## What happens
+## Pipeline
 
 ```
-clean     greedy CoT + 4 samples on GSM8K/MATH-500        -> clean.jsonl        (GPU, vLLM)
-inject    parse verified equations, build dependency graph,
-          inject +1 / x10 / digit-swap, compute the exact
-          propagated answer                                -> injections.jsonl   (CPU)
-continue  continue from each corrupted prefix (greedy + 4),
-          plus the clean prefix; label every run            -> continuations.jsonl (GPU, vLLM)
-extract   residual stream at the injected number, all
-          layers; surprisal of the injected digits          -> acts_*.npy          (GPU, HF)
-probes    P0-P5 + baselines + controls                      -> results.json        (CPU)
-report    tables, figures, example continuations            -> REPORT.md           (CPU)
+clean     greedy CoT + 4 samples on 6 datasets                       (GPU, vLLM)
+inject    parse verified equations, dependency graph, 6 error
+          operators, exact propagated answer for every injection     (CPU, seconds)
+continue  per injection: greedy, 4 samples, clean prefix,
+          + "Wait" arm on the corrupted and on the clean prefix       (GPU, vLLM)
+extract   residual stream at the injected number, all layers;
+          surprisal of the injected digits; prompt-time states        (GPU, transformers)
+probes    P0-P5, catchable headline, robustness, 50-shuffle null,
+          Wait-policy simulation, steering direction                  (CPU, many cores)
+steer     add ±alpha * direction at the probe layer, re-generate      (GPU, transformers)
+report    REPORT.md + figures, copied to reports/<run_name>/          (CPU)
 ```
 
-Every label is computed, never judged: FOLLOW means the final answer equals the answer you get by
-re-executing the trace's own equations with the wrong value; RECOVER means it equals gold.
+Big files (activations, ~10 GB) go to `${SCRATCH}/errprop_runs/<run_name>/`. The report, figures,
+`results.json` and per-injection probe scores are copied to `reports/<run_name>/` in this folder.
 
-## Setup (TamIA)
+## Running the full experiment on TamIA
+
+Assumes the environment from before (`~/errprop_env.sh`, venv on scratch, `accelerate` installed).
+
+**1. Unpack and cache the new datasets** (login node, needs internet, ~1 min):
 
 ```bash
-# login node (has internet)
-python -m venv ~/venvs/errprop && source ~/venvs/errprop/bin/activate
-pip install -r requirements.txt
-export HF_HOME=$SCRATCH/hf_cache
-python scripts/predownload.py                       # model + GSM8K + MATH-500 into the cache
-python -m pytest -q tests && python tests/synthetic_run.py   # CPU sanity checks, ~15 s
+source ~/errprop_env.sh && cd ~/probe_lab_linear
+tar xzf error_prop_probe_full.tar.gz --strip-components=1
+HF_HUB_OFFLINE=0 python scripts/predownload.py      # adds GSM-Symbolic P1/P2
+python -m pytest -q tests && python tests/synthetic_run.py
 ```
 
-## Run
-
-**1. Feasibility gate first (50 problems, ~20 min).** It answers the one question that decides
-whether the full run is worth it: are there enough FOLLOW *and* RECOVER cases?
+**2. Smoke test (recommended, ~40 min):** 10 problems per dataset through every stage, so a typo in
+a new dataset or the steering hook fails in minutes, not hours.
 
 ```bash
-sbatch slurm/tamia.sbatch --limit 50 --set run_name=gate
-cat runs/gate/REPORT.md      # look at "Labels" and the examples at the bottom
+sbatch --time=02:00:00 slurm/full.sbatch --limit 60 --set run_name=smoke steer.n=20
+tail -f logs/errprop_full-<JOBID>.out
 ```
 
-Go on if on-path FOLLOW and RECOVER are each ≥ ~15% and "valid" is ≥ ~0.8. If FOLLOW is rare, raise
-`data.math_n` / `data.math_min_level` (harder problems propagate more) before the full run.
+Check `reports/smoke/REPORT.md` exists and every dataset appears in the "Outcome rates by dataset"
+table. Numbers will be meaningless at this size.
 
-**2. Look-through run (~750 problems; my estimate is 1-2 hours on one H100 including the CPU
-probe sweep, but this has not been timed on TamIA yet, so the job asks for 6).**
+**3. Full run (~10-14 h, 18 h limit):**
 
 ```bash
-sbatch slurm/tamia.sbatch                     # run_name=look_v1 from config.yaml
+sbatch slurm/full.sbatch
 ```
 
-Stages can be rerun on their own, e.g. iterate on probes without touching the GPU:
+Rough stage times on one H100: clean 30 min · continue 2-3 h · extract 1-1.5 h · probes 2-4 h
+(CPU) · steer 1-1.5 h. Each stage prints a header with its duration in the log.
+
+**Resume after a failure** from the stage that failed; finished files are reused:
 
 ```bash
-python -m errprop.cli probes && python -m errprop.cli report
-python -m errprop.cli probes --set probes.layer_stride=2      # faster sweep
+STAGES="probes steer report" sbatch slurm/full.sbatch
 ```
 
-**Second model (once the first looks alive):**
+## What to show (reports/full_v1/REPORT.md)
 
-```bash
-sbatch slurm/tamia.sbatch --set run_name=r1_v1 model=deepseek-ai/DeepSeek-R1-Distill-Qwen-7B \
-    reasoning_model=true gen.clean_max_tokens=4096 gen.cont_max_tokens=3072 gen.max_model_len=8192
-```
-
-## Reading REPORT.md
-
-1. **Verdict**: the pre-registered rule from DIRECTION.md applied to P1.
-2. **Labels**: outcome counts by dataset and operator. Check these first; everything else is
-   meaningless if one class is tiny.
-3. **P1 table**: the probe vs four covariate baselines (difficulty, structure, the model's own
-   surprisal at the injected digits, all together) and the stacked model. Read the
-   **within-problem AUROC** column: it only compares injections into the same problem, so
-   difficulty cannot help there.
-4. **Controls**: shuffled labels (≈ 0.5) and off-path injections (corrupted but cannot propagate;
-   if the probe scores them like FOLLOW, it is reading "corrupted", not "will propagate").
-5. **P2 figure**: which digit a clean-trained probe reads on corrupted runs, by layer. Layer 0 reads
-   the injected digit by construction; the question is whether mid layers read the true digit more
-   on RECOVER than on FOLLOW runs.
-6. **Examples** at the bottom: read them. They are the fastest way to catch a parsing bug.
-
-Per-injection probe scores are in `p1_scores.csv`; the full table is `table.csv`.
+1. **Verdict**: the pre-registered rule on the catchable headline and on all injections.
+2. **Outcome rates by error size**: small errors are followed, large ones sometimes caught.
+3. **P1 catchable table**: probe vs difficulty / structure / surprisal / all covariates, gain, and
+   the permutation null.
+4. **Robustness**: by operator (the strict test), by dataset, by error size, across 5 splits.
+5. **W, the Wait-policy table and figure**: final accuracy at 5-50% intervention budget for probe-,
+   surprisal-, covariate- and random-ranked policies, with the oracle as ceiling. The mixed pool
+   includes clean steps, so false alarms cost accuracy there.
+6. **Steering table and figure**: FOLLOW rate vs alpha, with random-direction controls.
 
 ## Files
 
 ```
-DIRECTION.md          research direction, hypotheses, decision rule
-config.yaml           all settings (override any with --set key=value)
-errprop/arith.py      equation parser, dependency graph, injections, exact propagation
+DIRECTION.md          question, protocol lineage, datasets, pre-registered rule
+config.yaml           all settings (override with --set key=value)
+errprop/arith.py      equation parser, dependency graph, 6 injection operators, exact propagation
+errprop/synth.py      synthetic serial chains + BBH-format multistep arithmetic
+errprop/data.py       GSM8K, GSM-Symbolic, MATH-500 loaders
 errprop/labels.py     answer extraction, FOLLOW/RECOVER/OTHER, recovery type, horizon
-errprop/stages.py     clean / inject / continue / extract
+errprop/stages.py     clean / inject / continue / extract / steer
 errprop/probes.py     layer sweeps, grouped CV, within-problem AUROC, cluster bootstrap
-errprop/analysis.py   P0-P5, baselines, controls, verdict
+errprop/analysis.py   all probes, robustness, permutation null, Wait-policy simulation
 errprop/report.py     REPORT.md + figures
+slurm/full.sbatch     whole-node job, one process per stage, resumable via STAGES
 tests/                unit tests + synthetic end-to-end run with a planted signal
-slurm/tamia.sbatch    job script (account aip-oberman)
 ```
-
-## Known limits of this run
-
-- One model, one prompt format, greedy primary labels (samples feed the follow rate only).
-- Injections are value-only (+1, ×10, digit swap). Operator and premise errors are a later run.
-- The parser keeps only equations that check out arithmetically; traces written mostly in prose
-  or heavy LaTeX contribute few injection sites (the inject stage prints how many were skipped).
-- Steering (the causal test) is not in this run; it comes after P1 shows a direction worth steering.

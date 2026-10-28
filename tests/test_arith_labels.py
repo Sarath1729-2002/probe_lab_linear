@@ -95,3 +95,22 @@ def test_rounds_to_gold():
     assert rounds_to_gold(59.9667, 60)        # followed + rounded = looks like recovery
     assert not rounds_to_gold(61, 60)
     assert rounds_to_gold(0.751, 0.75) and not rounds_to_gold(0.8, 0.75)
+
+
+def test_new_operators_and_synth():
+    import random
+    from errprop.arith import corrupt_value, ALL_OPERATORS, candidate_injections, parse_equations
+    from errprop.synth import serial_chains, bbh_arithmetic
+    r = random.Random(0)
+    v = corrupt_value(480, "480", "random_same_digits", rng=r)
+    assert 100 <= v <= 999 and v != 480
+    v = corrupt_value(480, "480", "random_scale", rng=r)
+    assert v != 480 and 96 <= v <= 2400
+    assert corrupt_value(15, "15", "copy_operand", operands=[3, 5]) == 3
+    eqs = parse_equations("4 * -2 = -8\n-8 - 5 = -13")
+    assert eqs[1].parents[0] == 0                     # signed operand links to its producer
+    cands = candidate_injections(parse_equations(TRACE), 18, [16, 3, 4, 2, 5], kinds=ALL_OPERATORS, seed=1)
+    assert {c.kind for c in cands} >= {"random_scale", "copy_operand"}
+    ch = serial_chains(12, 0)
+    assert {c["level"] for c in ch} == {3, 4, 5, 6, 7, 8} and all(c["gold"] > 0 for c in ch)
+    assert all(b["question"].startswith("Compute") for b in bbh_arithmetic(5, 0))

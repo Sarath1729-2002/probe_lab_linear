@@ -19,7 +19,10 @@ def load_config(path: str, overrides: dict | None = None) -> dict:
 
 
 def run_dir(cfg: dict) -> Path:
-    d = Path(cfg["out_dir"]) / cfg["run_name"]
+    """Run folder. `out_dir` may use env vars, e.g. ${SCRATCH}/errprop_runs (big activation files
+    must not go to home: TamIA home has a 250K-file / 25 GB quota)."""
+    import os
+    d = Path(os.path.expandvars(cfg["out_dir"])) / cfg["run_name"]
     d.mkdir(parents=True, exist_ok=True)
     return d
 

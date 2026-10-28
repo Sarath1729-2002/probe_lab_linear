@@ -1,6 +1,7 @@
 """python -m errprop.cli <stage> [--config config.yaml] [--limit N] [--set key=value ...]
 
-stages: clean inject continue extract probes report | gpu (clean..extract) | cpu (probes, report) | all
+stages (one or more, run in order): clean inject continue extract probes steer report
+        shortcuts: gpu (clean..extract) | cpu (probes, report) | all (everything)
 """
 from __future__ import annotations
 
@@ -12,18 +13,21 @@ from .io import load_config
 
 GPU = ["clean", "inject", "continue", "extract"]
 CPU = ["probes", "report"]
+ALL = GPU + ["probes", "steer", "report"]
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("stage", choices=GPU + CPU + ["gpu", "cpu", "all"])
+    ap.add_argument("stage", nargs="+", choices=GPU + CPU + ["steer", "gpu", "cpu", "all"])
     ap.add_argument("--config", default="config.yaml")
     ap.add_argument("--limit", type=int, default=None, help="only N problems (feasibility gate)")
     ap.add_argument("--set", nargs="*", default=[], help="override config, e.g. run_name=gate model=...")
     a = ap.parse_args()
     cfg = load_config(a.config, {k: yaml.safe_load(v) for k, v in (s.split("=", 1) for s in a.set)})
 
-    stages = {"gpu": GPU, "cpu": CPU, "all": GPU + CPU}.get(a.stage, [a.stage])
+    stages = []
+    for st in a.stage:
+        stages += {"gpu": GPU, "cpu": CPU, "all": ALL}.get(st, [st])
     for s in stages:
         print(f"===== {s} =====", flush=True)
         if s == "clean":
@@ -41,6 +45,9 @@ def main():
         elif s == "probes":
             from .analysis import run_probes
             run_probes(cfg)
+        elif s == "steer":
+            from .stages import stage_steer
+            stage_steer(cfg)
         elif s == "report":
             from .report import write_report
             write_report(cfg)
