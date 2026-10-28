@@ -44,6 +44,48 @@ def _f(df, cols):
     return df[cols].astype(float).fillna(0.0).to_numpy()
 
 
+def rounds_to_gold(prop: float, gold: float) -> bool:
+    """True when the propagated answer is indistinguishable from gold after ordinary rounding."""
+    if prop is None or gold is None:
+        return False
+    if abs(gold - round(gold)) < 1e-9:                 # integer gold: model would round to it
+        return abs(prop - gold) < 0.5
+    return abs(prop - gold) <= 0.01 * max(1.0, abs(gold))
+
+
+def _p1_core(s, path_c, layers, pc, seed, nb, nj, split):
+    """FOLLOW vs RECOVER on table `s` with a given dev/test split: probe, all-covariate baseline,
+    and the AUROC gain from adding the probe to the covariates. nb=0 skips bootstrap CIs."""
+    y = (s.outcome == "FOLLOW").astype(int).to_numpy()
+    g = s.problem_id.to_numpy()
+    dv, te = split == "dev", split == "test"
+    out = {"n_dev": int(dv.sum()), "n_test": int(te.sum()),
+           "follow_rate": float(y.mean()) if len(y) else None}
+    if len(s) < 40 or len(np.unique(y[dv])) < 2 or len(np.unique(y[te])) < 2:
+        out["skipped"] = "too few rows or only one class in dev/test"
+        return out
+    r = sweep_and_test(path_c, s.row.to_numpy(), y, g, dv, te, layers, pc["C_grid"], pc["folds"], "clf", nj)
+    probe = r["pred_all"]
+    F = _f(s, ALL_COV)
+    z_all = probe.copy()
+    z_all[dv] = np.nan_to_num(r["oof_dev"])
+    cov_s = covariate_clf(F, y, dv, te)
+    stk_s = covariate_clf(np.c_[F, z_all], y, dv, te)
+    yt, gt = y[te], g[te]
+    w, n_mixed = within_auc(probe[te], yt, gt)
+    out.update({
+        "best_layer": r["best_layer"],
+        "probe_auroc": safe_auc(yt, probe[te]), "probe_within": w, "n_mixed": n_mixed,
+        "cov_auroc": safe_auc(yt, cov_s[te]), "cov_within": within_auc(cov_s[te], yt, gt)[0],
+        "delta": safe_auc(yt, stk_s[te]) - safe_auc(yt, cov_s[te]),
+    })
+    if nb:
+        out["probe_auroc_ci"] = cluster_bootstrap(lambda i: safe_auc(yt[i], probe[te][i]), gt, nb, seed)
+        out["delta_ci"] = cluster_bootstrap(
+            lambda i: safe_auc(yt[i], stk_s[te][i]) - safe_auc(yt[i], cov_s[te][i]), gt, nb, seed)
+    return out
+
+
 def run_probes(cfg: dict) -> dict:
     rd = run_dir(cfg)
     pc = cfg["probes"]
@@ -74,7 +116,14 @@ def run_probes(cfg: dict) -> dict:
     # setup sanity: the clean truncated prefix still solves it, and the model did not extend the
     # injected number with more digits
     valid = df.clean_cont_correct.to_numpy() & ~df.glued.to_numpy(bool)
+    # label ambiguity: if the propagated answer rounds to gold (e.g. 59.97 vs 60), a model that
+    # followed the error and rounded is indistinguishable from one that recovered
+    amb = df.on_path.to_numpy() & np.array([rounds_to_gold(p, g) for p, g in zip(df.propagated_answer, df.gold)])
+    df["ambiguous"] = amb
+    valid &= ~amb
     R["counts"]["glued_rate"] = float(df.glued.mean())
+    R["counts"]["ambiguous_label_rate"] = float(amb.mean())
+    R["counts"]["ambiguous_label_n"] = int(amb.sum())
     R["counts"]["valid_rate"] = float(valid.mean())
     path_c = str(rd / "acts_corrupt.npy")
 
@@ -155,6 +204,30 @@ def run_probes(cfg: dict) -> dict:
     else:
         P1["skipped"] = "need both FOLLOW and RECOVER in dev and test"
     R["probes"]["P1_follow_vs_recover"] = P1
+
+    # ---------------------------------------------------------------- P1 within each operator
+    # Outcome depends strongly on the operator (+1 mostly followed, x10 mostly caught). Inside one
+    # operator that shortcut is gone: does the probe still beat the covariates?
+    if "probe" in P1:
+        per_op = {}
+        for kind in sorted(s1.kind.unique()):
+            sk = s1[s1.kind == kind].reset_index(drop=True)
+            per_op[kind] = _p1_core(sk, path_c, layers, pc, seed, nb, nj, split=sk.split.to_numpy())
+        R["probes"]["P1_by_operator"] = per_op
+
+        # ------------------------------------------------------------ P1 split stability
+        seeds = pc.get("split_seeds", [0, 1, 2, 3, 4])
+        runs = []
+        for s_ in seeds:
+            d_, t_ = split_problems(s1.problem_id.to_numpy(), pc["test_frac"], s_)
+            r_ = _p1_core(s1, path_c, layers, pc, s_, 0, nj, split=np.where(t_, "test", "dev"))
+            if "probe_auroc" in r_:
+                runs.append({"seed": s_, **{k: r_[k] for k in ("best_layer", "probe_auroc", "probe_within",
+                                                              "n_mixed", "cov_auroc", "delta")}})
+        if runs:
+            agg = {k: [float(np.nanmean([r[k] for r in runs])), float(np.nanstd([r[k] for r in runs]))]
+                   for k in ("probe_auroc", "probe_within", "cov_auroc", "delta")}
+            R["probes"]["P1_split_stability"] = {"runs": runs, "mean_sd": agg}
 
     # ---------------------------------------------------------------- P1r: follow rate (regression)
     m1r = valid & df.on_path.to_numpy() & df.follow_rate.notna().to_numpy()

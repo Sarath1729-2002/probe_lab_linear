@@ -142,8 +142,10 @@ def write_report(cfg):
          f"- Recovery types (on-path RECOVER): `{c['recovery_types']}`",
          f"- Injected value re-used in continuation (uptake), on-path: {c['uptake_rate_on_path']:.3f}",
          f"- Sanity: clean truncated prefix still reaches gold: {c['clean_cont_correct_rate']:.3f}; "
-         f"model extended the injected number with more digits: {c['glued_rate']:.3f}. "
-         f"Rows failing either are excluded from every probe (valid: {c['valid_rate']:.3f}).", ""]
+         f"model extended the injected number with more digits: {c['glued_rate']:.3f}; "
+         f"propagated answer rounds to gold (FOLLOW and RECOVER indistinguishable): "
+         f"{c.get('ambiguous_label_n', 0)} injections. "
+         f"Rows failing any of these are excluded from every probe (valid: {c['valid_rate']:.3f}).", ""]
 
     p0 = p.get("P0_detect", {})
     if p0.get("test"):
@@ -173,6 +175,34 @@ def write_report(cfg):
         L.append("")
     else:
         L += [f"Skipped: {p1.get('skipped')}. Counts above show why.", ""]
+
+    if p.get("P1_by_operator"):
+        L += ["### P1 within each operator", "",
+              "The operator alone predicts a lot (+1 is mostly followed, ×10 mostly caught). Inside one "
+              "operator that shortcut is gone, so this is the stricter test.", "",
+              "| Operator | n dev / test | FOLLOW rate | Probe AUROC [CI] | Within-problem | Covariates AUROC | Δ (probe over covariates) [CI] | layer |",
+              "|---|---|---|---|---|---|---|---|"]
+        for k, q in p["P1_by_operator"].items():
+            if "skipped" in q:
+                L.append(f"| {k} | {q['n_dev']} / {q['n_test']} | {_f3(q['follow_rate'])} | skipped: {q['skipped']} | | | | |")
+            else:
+                L.append(f"| {k} | {q['n_dev']} / {q['n_test']} | {_f3(q['follow_rate'])} | "
+                         f"{_f3(q['probe_auroc'])} {_ci(q.get('probe_auroc_ci'))} | {_f3(q['probe_within'])} "
+                         f"(n={q['n_mixed']}) | {_f3(q['cov_auroc'])} | {_f3(q['delta'])} {_ci(q.get('delta_ci'))} | "
+                         f"{q['best_layer']} |")
+        L.append("")
+    if p.get("P1_split_stability"):
+        q = p["P1_split_stability"]
+        L += ["### P1 across random dev/test splits", "",
+              "| Split seed | Layer | Probe AUROC | Within-problem (n mixed) | Covariates AUROC | Δ |",
+              "|---|---|---|---|---|---|"]
+        for r in q["runs"]:
+            L.append(f"| {r['seed']} | {r['best_layer']} | {_f3(r['probe_auroc'])} | {_f3(r['probe_within'])} "
+                     f"({r['n_mixed']}) | {_f3(r['cov_auroc'])} | {_f3(r['delta'])} |")
+        m = q["mean_sd"]
+        L += [f"| **mean ± sd** | | {m['probe_auroc'][0]:.3f} ± {m['probe_auroc'][1]:.3f} | "
+              f"{m['probe_within'][0]:.3f} ± {m['probe_within'][1]:.3f} | "
+              f"{m['cov_auroc'][0]:.3f} ± {m['cov_auroc'][1]:.3f} | {m['delta'][0]:.3f} ± {m['delta'][1]:.3f} |", ""]
 
     if p.get("P1r_follow_rate"):
         q = p["P1r_follow_rate"]

@@ -88,3 +88,10 @@ def test_label_continuation():
     r2 = label_continuation(cont2, 18, inj)
     assert r2["outcome"] == "RECOVER" and r2["recovery_type"] == "restated" and r2["horizon"] == 0
     assert contamination_horizon("10 * 2 = 20", [10]) == 1
+
+
+def test_rounds_to_gold():
+    from errprop.analysis import rounds_to_gold
+    assert rounds_to_gold(59.9667, 60)        # followed + rounded = looks like recovery
+    assert not rounds_to_gold(61, 60)
+    assert rounds_to_gold(0.751, 0.75) and not rounds_to_gold(0.8, 0.75)
