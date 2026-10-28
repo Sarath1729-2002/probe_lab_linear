@@ -90,3 +90,65 @@ monotonically with alpha, and random directions of equal norm do not.
 - Injections are value edits of verified equations; operator and premise errors are not covered.
 - "Wait" is one intervention; a re-generation or tool-call check would be the next comparison.
 - Labels rely on the model writing explicit equations; prose-heavy traces contribute fewer sites.
+
+---
+
+## 7. Update (fast_v1 result → paper_v1 plan): probing only, recreating "How Much is Left?"
+
+### fast_v1 result
+Qwen2.5-7B, 2800 problems, 9095 injections, 6 datasets.
+
+**Positive:**
+- P1 catchable AUROC 0.963, a gain of +0.101 [0.077, 0.129] over covariates.
+- Within-problem AUROC 0.971.
+- AUROC above 0.93 on every dataset.
+- P1r, P4 and prompt-time P5 all beat their covariates.
+
+**Null or uninformative:**
+- P2 and P3.
+- The "Wait" policy: the probe did not beat surprisal, and on clean steps it raised false alarms.
+- Steering at ±4/±8 broke the model, the same as the random direction.
+
+**Decision:**
+- Drop steering and the intervention arms.
+- Present the work as an initial probing result.
+- Drop copy_operand: it was a labelling artefact, because the model read the injected number as the start of a new expression.
+
+### paper_v1 design (revised 2026-10-28)
+A level-1 recreation of *How Much is Left?*, with propagation in place of remaining length. Probing only.
+
+**Models:** Qwen2.5-7B, DeepSeek-R1-Distill-Qwen-7B (reasoning; plays the paper's Qwen3-4B role in the retraction analysis), Llama-3.1-8B and Mistral-7B. Olmo is dropped.
+
+**Datasets** follow the paper's 2 synthetic + 5 standard sets, each restricted to exactly checkable numeric answers:
+
+| Dataset | Paper's counterpart | Constraint |
+|---|---|---|
+| Chains | Count | — |
+| BBH-Arith | Countdown | — |
+| GSM8K | GSM8K | — |
+| MATH | MATH | full test set, strict numeric `\boxed` |
+| MMLU-Pro | MMLU-Pro | numeric-option subset, options withheld, 2% tolerance |
+| OpenThoughts-1k | OpenThoughts-1k | numeric math |
+| TriviaQA | TriviaQA | numeric answers; the error is a wrong recalled fact |
+
+**Metrics, mapped to the paper:**
+
+| Ours | Paper |
+|---|---|
+| Constant | Median |
+| Prompt-only + structure | Exact countdown |
+| Prompt-only probe | Completion-length probe |
+| Error-token probe | Remaining-count probe |
+| Black-box covariates | — (an extra observer baseline) |
+
+- AUROC, plus Brier and log-loss ÷ constant (the paper's MAE ÷ floor).
+- Transfer ÷ eval floor, with the natural-vs-synthetic asymmetry and a Fisher test (§5, A.10).
+- Pre-specified "Wait" event: Δ against matched controls, Cohen's d, sign-flip and label-shuffle tests, and a discovery scan (§4.3, A.16).
+- TF-IDF surface and shuffled-label controls (A.12).
+- Sampling-noise floor (A.13).
+- Cohen's κ (A.14).
+- Horizon MAE against the median floor.
+- Layer sweep (A.2).
+- Exclusions (A.7).
+
+**Entry point:** `predownload_paper.py`, then `sbatch slurm/paper.sbatch`, producing `reports/paper_v1/PAPER.md`.

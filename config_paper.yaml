@@ -1,0 +1,85 @@
+# Level-1 recreation of "How Much is Left?" for error propagation. One job per model:
+#   bash slurm/submit_paper.sh            (see README)
+run_prefix: paper_v1
+run_name: paper_v1                      # replaced by <run_prefix>-<tag> when --model is given
+out_dir: ${SCRATCH}/errprop_runs
+report_dir: reports
+seed: 0
+
+models:                                 # paper's Llama + Mistral, our pilot Qwen, and a reasoning distill
+  - {tag: qwen7b,    short: Qwen2.5-7B,     name: Qwen/Qwen2.5-7B-Instruct}
+  - {tag: r1qwen7b,  short: R1-Distill-Qwen-7B, name: deepseek-ai/DeepSeek-R1-Distill-Qwen-7B,
+     overrides: {reasoning_model: true, no_system: true, gen.clean_max_tokens: 4096,
+                 gen.cont_max_tokens: 3072, gen.max_model_len: 12288}}
+  - {tag: llama8b,   short: Llama-3.1-8B,   name: meta-llama/Llama-3.1-8B-Instruct}       # gated: needs HF_TOKEN
+  - {tag: mistral7b, short: Mistral-7B,     name: mistralai/Mistral-7B-Instruct-v0.3}    # gated: needs HF_TOKEN
+  # optional: {tag: r1llama8b, short: R1-Distill-Llama-8B, name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B, overrides: (as r1qwen7b)}
+model: Qwen/Qwen2.5-7B-Instruct
+reasoning_model: false
+no_system: false
+
+data:                                   # paper §3.7: 2 synthetic (controlled) + 5 standard sets
+  data_dir: ${SCRATCH}/errprop_data     # written by scripts/prepare_data.py on the login node
+  chains_n: 500                         # synthetic: serial chains   (paper: Count)
+  bbh_n: 300                            # synthetic: BBH arithmetic  (paper: Countdown)
+  gsm8k_n: 1000
+  math_full_n: 1200                     # MATH test, numeric \boxed answers
+  mmlu_pro_n: 1000                      # numeric-answer subset, options withheld, 2% tolerance
+  openthoughts_n: 1000                  # OpenThoughts-1k: math, numeric answers
+  triviaqa_n: 2000                      # numeric answers; injected error = a wrong recalled fact
+  gsm_hard_n: 0                         # earlier extra sets, off by default
+  gsm_symbolic: {p1: 0, p2: 0}
+  math_n: 0
+  math_min_level: 1
+  synthetic: [chains, bbh_arith]        # train-type split for the transfer asymmetry test (paper §5)
+
+gen:
+  backend: vllm
+  max_model_len: 4096
+  clean_max_tokens: 768
+  cont_max_tokens: 512
+  n_samples: 0                          # greedy only (probing needs one label per injection)
+  noise_n: 400                          # sampling-noise floor (paper App. A.13): injections resampled
+  noise_k: 6                            #   k times at the paper's decoding (T 0.7, top-p 0.8)
+  noise_temperature: 0.7
+  noise_top_p: 0.8
+  temperature: 0.7
+  top_p: 0.95
+  gpu_mem: 0.85
+
+inject:                                 # copy_operand dropped (labelling artefact in fast_v1)
+  max_on: 4                             # per problem (bounds R1 continuation cost)
+  max_off: 1
+  kinds: [plus_one, digit_swap, times_ten, random_scale, random_same_digits]
+
+intervene:
+  enabled: false
+  wait_text: "\n\nWait,"
+
+extract:
+  dtype: bfloat16
+
+probes:
+  test_frac: 0.2
+  folds: 3
+  C_grid: [0.01, 0.1]
+  alpha_grid: [100, 1000, 10000]
+  layer_step: 2
+  layer_stride: 2
+  split_seeds: [0, 1, 2]                # paper: mean over 3 seeds
+  n_boot: 500
+  n_perm: 30
+  n_jobs: -1
+
+trajectory:
+  n_items: 800                          # held-out items, half FOLLOW / half RECOVER
+  max_tokens: 1536                      # probe read over the whole continuation up to this length
+  trigger: Wait                         # pre-specified retraction token (paper §4.3)
+  control_window: 10                    # controls exclude +-10 tokens around any trigger
+  position_bucket: 50
+  n_controls: 100
+  n_signflip: 10000
+  before: 8
+  after: 48
+  align_half: 12
+  n_examples: 3

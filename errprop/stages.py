@@ -9,11 +9,18 @@
 """
 from __future__ import annotations
 
+import os
+
+DEVICE = os.environ.get("ERRPROP_DEVICE", "cuda")   # set to cpu for local smoke tests
+
 import math
+import random
+import re
 import zlib
 from collections import Counter
 
-from .arith import parse_equations, candidate_injections, select_injections, numbers_in, close
+from .arith import (parse_equations, candidate_injections, select_injections, numbers_in, close,
+                    mention_injections)
 from .io import run_dir, write_jsonl, read_jsonl
 from .labels import extract_answer, label_continuation
 
@@ -36,19 +43,24 @@ def stage_clean(cfg: dict, limit: int | None = None) -> None:
     print(f"[clean] problems per dataset: {dict(Counter(p['dataset'] for p in probs))}", flush=True)
 
     gen = Generator(cfg)
-    prompts = [render_prompt(gen.tokenizer, p["question"]) for p in probs]
+    prompts = [render_prompt(gen.tokenizer, p["question"], p.get("instruction"), cfg.get("no_system", False))
+               for p in probs]
     greedy = gen.generate(prompts, n=1, temperature=0.0, max_tokens=g["clean_max_tokens"], seed=seed)
-    samples = gen.generate(prompts, n=g["n_samples"], temperature=g["temperature"],
-                           max_tokens=g["clean_max_tokens"], seed=seed)
+    samples = [[] for _ in prompts]
+    if g.get("n_samples", 0):
+        samples = gen.generate(prompts, n=g["n_samples"], temperature=g["temperature"],
+                               max_tokens=g["clean_max_tokens"], seed=seed)
 
     rows = []
     for p, pr, gr, sm in zip(probs, prompts, greedy, samples):
         trace = gr[0]
         ans = extract_answer(trace)
-        n_ok = sum(close(extract_answer(s), p["gold"], rel=1e-4) for s in sm)
+        tol = p.get("tol", 1e-4)
+        n_ok = sum(close(extract_answer(s), p["gold"], rel=tol) for s in sm)
         rows.append({**p, "prompt": pr, "trace": trace, "greedy_answer": ans,
-                     "correct": close(ans, p["gold"], rel=1e-4),
-                     "pass_rate": n_ok / max(1, len(sm)),
+                     "correct": close(ans, p["gold"], rel=tol),
+                     "has_final": bool(re.search(r"####|\\boxed", trace.split("</think>")[-1])),
+                     "pass_rate": n_ok / len(sm) if sm else None,
                      "n_eq": len(parse_equations(trace))})
     write_jsonl(run_dir(cfg) / "clean.jsonl", rows)
     acc = sum(r["correct"] for r in rows) / len(rows)
@@ -76,25 +88,41 @@ def stage_inject(cfg: dict) -> None:
             trace_for_parse = trace.split("</think>")[0]
         else:
             trace_for_parse = trace
-        eqs = parse_equations(trace_for_parse)
         pseed = cfg["seed"] + zlib.crc32(r["id"].encode()) % 100_000
-        cands = candidate_injections(eqs, r["gold"], numbers_in(r["question"]),
-                                     kinds=tuple(ic["kinds"]), seed=pseed)
-        sel = select_injections(cands, ic["max_on"], ic["max_off"], seed=pseed)
-        if not sel:
+        tol = r.get("tol", 1e-4)
+        qnums = numbers_in(r["question"])
+        if r.get("site") == "mention":          # recalled answers (TriviaQA): one stated-fact site
+            body = trace_for_parse.split("####")[0]
+            sites = mention_injections(body, r["gold"], qnums, kinds=tuple(ic["kinds"]), seed=pseed)
+            rng_m = random.Random(pseed)
+            rng_m.shuffle(sites)
+            sites = sites[: ic["max_on"]]
+            n_eq = 0
+        else:
+            eqs = parse_equations(trace_for_parse)
+            # anchor on the model's own final answer (equal to gold within tol): for rounded golds
+            # (MMLU-Pro) the answer equation carries the model's unrounded value
+            anchor = r["greedy_answer"] if r.get("greedy_answer") is not None else r["gold"]
+            cands = candidate_injections(eqs, anchor, qnums, kinds=tuple(ic["kinds"]), seed=pseed)
+            for c in cands:          # the wrong answer must be distinguishable from gold at this tolerance
+                if c.changes_answer and close(c.propagated_answer, r["gold"], rel=3 * tol):
+                    c.changes_answer = False
+            sel = select_injections(cands, ic["max_on"], ic["max_off"], seed=pseed)
+            sites = [(c, eqs[c.eq_idx].rhs_start, eqs[c.eq_idx].rhs_end) for c in sel]
+            n_eq = len(eqs)
+        if not sites:
             stats["skip_no_injection"] += 1
             continue
         stats["problems_used"] += 1
-        for j, inj in enumerate(sel):
-            e = eqs[inj.eq_idx]
-            prefix_corrupt = trace[: e.rhs_start] + inj.new_text
-            prefix_clean = trace[: e.rhs_end]
+        for j, (inj, a, b) in enumerate(sites):
+            prefix_corrupt = trace[:a] + inj.new_text
+            prefix_clean = trace[:b]
             rec = {
                 "inj_id": f"{r['id']}#{j}", "problem_id": r["id"], "group": r.get("group", r["id"]),
-                "dataset": r["dataset"],
+                "dataset": r["dataset"], "tol": tol, "site": r.get("site", "equation"),
                 "level": r["level"], "gold": r["gold"], "pass_rate": r["pass_rate"],
                 "prompt": r["prompt"], "prefix_corrupt": prefix_corrupt, "prefix_clean": prefix_clean,
-                "n_eq": len(eqs), "base_chars": e.rhs_start, "trace_chars": len(trace),
+                "n_eq": n_eq, "base_chars": a, "trace_chars": len(trace),
                 **{k: v for k, v in inj.__dict__.items()},
             }
             rec["log_rel_err"] = math.log10(abs(inj.new_value - inj.true_value) / max(abs(inj.true_value), 1e-9))
@@ -118,24 +146,41 @@ def stage_continue(cfg: dict) -> None:
     corrupt = [i["prompt"] + i["prefix_corrupt"] for i in injs]
     clean = [i["prompt"] + i["prefix_clean"] for i in injs]
     wait = cfg["intervene"]["wait_text"]
+    use_wait = cfg["intervene"].get("enabled", True)
+    n_samp = g.get("n_samples", 0)
     print(f"[continue] {len(injs)} injections: greedy", flush=True)
     greedy = gen.generate(corrupt, 1, 0.0, g["cont_max_tokens"], seed)
-    print("[continue] samples", flush=True)
-    samples = gen.generate(corrupt, g["n_samples"], g["temperature"], g["cont_max_tokens"], seed)
+    samples = [[] for _ in injs]
+    if n_samp:
+        print("[continue] samples", flush=True)
+        samples = gen.generate(corrupt, n_samp, g["temperature"], g["cont_max_tokens"], seed)
+    # sampling-noise floor (paper App. A.13): k sampled continuations for a random subset, so the
+    # irreducible spread of the outcome under stochastic decoding can be measured
+    noise = [None] * len(injs)
+    nn = min(g.get("noise_n", 0), len(injs))
+    if nn:
+        on = [i for i, x in enumerate(injs) if x["on_path"]]
+        sub = sorted(random.Random(seed).sample(on, min(nn, len(on))))
+        print(f"[continue] noise floor: {len(sub)} injections x {g['noise_k']} samples", flush=True)
+        outs = gen.generate([corrupt[i] for i in sub], g["noise_k"], g.get("noise_temperature", 0.7),
+                            g["cont_max_tokens"], seed, top_p=g.get("noise_top_p", 0.8))
+        for i, texts in zip(sub, outs):
+            noise[i] = [label_continuation(t, injs[i]["gold"], injs[i])["outcome"] for t in texts]
     print("[continue] clean prefix", flush=True)
     clean_greedy = gen.generate(clean, 1, 0.0, g["cont_max_tokens"], seed)
     # intervention arm (Self-Correction Bench, Tsui 2025: appending "Wait" activates correction).
-    # Run on every corrupted AND clean prefix, so any monitor policy can be simulated offline:
-    # intervening on a corrupted step can rescue it; intervening on a clean step can break it.
-    print("[continue] wait-intervention arms", flush=True)
-    wait_corrupt = gen.generate([c + wait for c in corrupt], 1, 0.0, g["cont_max_tokens"], seed)
-    wait_clean = gen.generate([c + wait for c in clean], 1, 0.0, g["cont_max_tokens"], seed)
+    # Run on every corrupted AND clean prefix, so any monitor policy can be simulated offline.
+    wait_corrupt = wait_clean = [[""] for _ in injs]
+    if use_wait:
+        print("[continue] wait-intervention arms", flush=True)
+        wait_corrupt = gen.generate([c + wait for c in corrupt], 1, 0.0, g["cont_max_tokens"], seed)
+        wait_clean = gen.generate([c + wait for c in clean], 1, 0.0, g["cont_max_tokens"], seed)
 
     out, tally, tally_w = [], Counter(), Counter()
-    for inj, gr, sm, cg, wc, wk in zip(injs, greedy, samples, clean_greedy, wait_corrupt, wait_clean):
+    for inj, gr, sm, cg, wc, wk, nz in zip(injs, greedy, samples, clean_greedy, wait_corrupt, wait_clean, noise):
         lab_g = label_continuation(gr[0], inj["gold"], inj)
         lab_s = [label_continuation(t, inj["gold"], inj) for t in sm]
-        lab_w = label_continuation(wc[0], inj["gold"], inj)
+        lab_w = label_continuation(wc[0], inj["gold"], inj) if use_wait else {"outcome": None}
         runs = [lab_g] + lab_s
         n_follow = sum(x["outcome"] == "FOLLOW" for x in runs)
         n_scored = sum(x["outcome"] in ("FOLLOW", "RECOVER", "OTHER") for x in runs)
@@ -143,9 +188,9 @@ def stage_continue(cfg: dict) -> None:
             "inj_id": inj["inj_id"],
             "greedy_text": gr[0], "sample_texts": sm, "clean_text": cg[0],
             "wait_text": wc[0], "wait_clean_text": wk[0],
-            "greedy": lab_g, "samples": lab_s, "wait": lab_w,
-            "clean_cont_correct": close(extract_answer(cg[0]), inj["gold"], rel=1e-4),
-            "wait_clean_correct": close(extract_answer(wk[0]), inj["gold"], rel=1e-4),
+            "greedy": lab_g, "samples": lab_s, "wait": lab_w, "noise": nz,
+            "clean_cont_correct": close(extract_answer(cg[0]), inj["gold"], rel=inj.get("tol", 1e-4)),
+            "wait_clean_correct": close(extract_answer(wk[0]), inj["gold"], rel=inj.get("tol", 1e-4)) if use_wait else None,
             "follow_rate": n_follow / n_scored if n_scored else None,
         })
         tally[lab_g["outcome"]] += 1
@@ -166,7 +211,7 @@ def stage_extract(cfg: dict) -> None:
     injs = read_jsonl(rd / "injections.jsonl")
     tok = AutoTokenizer.from_pretrained(cfg["model"])
     model = AutoModelForCausalLM.from_pretrained(
-        cfg["model"], dtype=getattr(torch, cfg["extract"]["dtype"]), device_map="cuda").eval()
+        cfg["model"], dtype=getattr(torch, cfg["extract"]["dtype"]), device_map=DEVICE).eval()
     n_layers = model.config.num_hidden_layers + 1
     d_model = model.config.hidden_size
 
@@ -178,7 +223,7 @@ def stage_extract(cfg: dict) -> None:
         """Hidden states at the last token (all layers) and, if `base_text` is given, the surprisal
         (-sum log p) of the tokens that come after it, i.e. of the injected/true number."""
         ids = enc(text)
-        x = torch.tensor([ids], device="cuda")
+        x = torch.tensor([ids], device=DEVICE)
         o = model(x, output_hidden_states=True)
         hs = torch.stack([h[0, -1] for h in o.hidden_states]).float().cpu().numpy().astype(np.float16)
         if base_text is None:
@@ -256,7 +301,7 @@ def stage_steer(cfg: dict) -> None:
     tok.padding_side = "left"
     if tok.pad_token is None:
         tok.pad_token = tok.eos_token
-    model = AutoModelForCausalLM.from_pretrained(cfg["model"], dtype=torch.bfloat16, device_map="cuda").eval()
+    model = AutoModelForCausalLM.from_pretrained(cfg["model"], dtype=torch.bfloat16, device_map=DEVICE).eval()
     block = model.model.layers[max(0, layer - 1)]      # hidden_states[l] is the output of block l-1
     state = {"delta": None}
 
@@ -279,11 +324,11 @@ def stage_steer(cfg: dict) -> None:
     prompts = [i["prompt"] + i["prefix_corrupt"] for i in items]
     rows, summary = [], []
     for name, a, v in conds:
-        state["delta"] = None if a == 0 else torch.tensor(a * sd * v, dtype=torch.bfloat16, device="cuda")
+        state["delta"] = None if a == 0 else torch.tensor(a * sd * v, dtype=torch.bfloat16, device=DEVICE)
         texts = []
         for b in range(0, len(prompts), sc["batch_size"]):
             enc = tok(prompts[b:b + sc["batch_size"]], return_tensors="pt", padding=True,
-                      add_special_tokens=False).to("cuda")
+                      add_special_tokens=False).to(DEVICE)
             with torch.no_grad():
                 ids = model.generate(**enc, max_new_tokens=sc["max_new_tokens"], do_sample=False,
                                      pad_token_id=tok.pad_token_id)

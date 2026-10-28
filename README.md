@@ -24,6 +24,67 @@ report    REPORT.md + figures, copied to reports/<run_name>/          (CPU)
 Big files (activations, ~10 GB) go to `${SCRATCH}/errprop_runs/<run_name>/`. The report, figures,
 `results.json` and per-injection probe scores are copied to `reports/<run_name>/` in this folder.
 
+## Paper recreation: "How Much is Left?" for error propagation (probing only)
+
+A level-1 recreation of *How Much is Left? LLMs Linearly Encode Their Remaining Output Length*, with
+"will the model propagate this injected error?" in place of "how many tokens are left?". There is no
+steering: this is an initial probing result.
+
+**Models:**
+- `Qwen/Qwen2.5-7B-Instruct`: the pilot model.
+- `deepseek-ai/DeepSeek-R1-Distill-Qwen-7B`: a reasoning model. It fills the paper's Qwen3-4B role in the retraction analysis.
+- `meta-llama/Llama-3.1-8B-Instruct` and `mistralai/Mistral-7B-Instruct-v0.3`: the paper's own models. Both are gated.
+
+**Datasets** follow the paper's §3.7 (2 synthetic + 5 standard), each restricted to answers that can be checked exactly:
+
+| Dataset | Paper's counterpart | Constraint |
+|---|---|---|
+| Chains (synthetic) | Count | — |
+| BBH-Arith (synthetic) | Countdown | — |
+| GSM8K | GSM8K | — |
+| MATH | MATH | full test set; `\boxed` answer must be a plain number |
+| MMLU-Pro | MMLU-Pro | numeric-option questions; options withheld; 2% tolerance |
+| OpenThoughts-1k | OpenThoughts-1k | 1k numeric math problems |
+| TriviaQA | TriviaQA | numeric answers; the injected error is a wrong recalled fact at the first place the model states it |
+
+**Metrics, mapped to the paper:**
+
+| Paper | Here |
+|---|---|
+| Constant / exact countdown / Completion Length / Remaining Count | Constant / prompt-only + structure / prompt-only probe / error-token probe. The black-box observer is an extra row. |
+| MAE and MAE ÷ floor | AUROC; Brier and log-loss ÷ constant |
+| §4.3 retraction analysis | Pre-specified `Wait` trigger. Δ of the probe logit against matched controls, Cohen's d, cluster sign-flip and label-shuffle tests, plus a discovery scan on a disjoint half |
+| §5 transfer matrix ÷ eval floor | Same, plus the natural-vs-synthetic asymmetry count and a Fisher test |
+| App. A.7 | Exclusions |
+| App. A.12 | TF-IDF surface baselines; global and within-problem shuffled labels |
+| App. A.13 | Sampling-noise floor (6 samples at T 0.7 / top-p 0.8) |
+| App. A.14 | Cohen's κ |
+| App. A.2 | Layer sweep |
+| Remaining-count MAE | Contamination horizon: MAE against the constant-median floor |
+
+All results are the mean ± sd over 3 problem-level splits.
+
+**To run:**
+```bash
+source ~/errprop_env.sh && cd ~/probe_lab_linear
+tar xzf error_prop_probe_paper.tar.gz --strip-components=1
+# gated models: accept the licences on the HF pages of Llama-3.1-8B-Instruct and Mistral-7B-Instruct-v0.3, then
+huggingface-cli login                                   # or: export HF_TOKEN=hf_...
+HF_HUB_OFFLINE=0 python scripts/predownload_paper.py    # login node: 4 models + GSM8K + prepare_data.py
+python -m pytest -q tests && python tests/synthetic_paper.py
+sbatch slurm/paper.sbatch                               # 1 node, 4 models in parallel, 1 GPU each
+```
+
+`prepare_data.py` prints each source's column names and row counts. If a row says FAILED, that
+dataset is skipped and the rest run. Each model logs every stage to
+`logs/ep_<tag>-<jobid>-<stage>.log`; the main log shows which stages ran and how long each took.
+
+- **Resume:** `STAGES="fit trajectory" MODELS="r1qwen7b" sbatch slurm/paper.sbatch`.
+- **Rebuild the report on the login node:** `python -m errprop.cli paper --config config_paper.yaml`.
+- **Output:** `reports/paper_v1/PAPER.md` plus figures.
+- **R1-Distill is the slow model:** traces of up to 4k tokens and continuations of up to 3k. If the job
+  runs short, give it its own job: `MODELS=r1qwen7b sbatch slurm/paper.sbatch`.
+
 ## Running the full experiment on TamIA
 
 Assumes the environment from before (`~/errprop_env.sh`, venv on scratch, `accelerate` installed).

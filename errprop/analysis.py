@@ -83,10 +83,13 @@ def build_table(rd) -> pd.DataFrame:
     return df
 
 
-def rounds_to_gold(prop: float, gold: float) -> bool:
-    """True when the propagated answer is indistinguishable from gold after ordinary rounding."""
+def rounds_to_gold(prop: float, gold: float, tol: float = 1e-4) -> bool:
+    """True when the propagated answer is indistinguishable from gold after ordinary rounding
+    (or within the dataset's answer tolerance, times 3 for margin)."""
     if prop is None or gold is None:
         return False
+    if abs(prop - gold) <= 3 * tol * max(1.0, abs(gold)):
+        return True
     if abs(gold - round(gold)) < 1e-9:
         return abs(prop - gold) < 0.5
     return abs(prop - gold) <= 0.01 * max(1.0, abs(gold))

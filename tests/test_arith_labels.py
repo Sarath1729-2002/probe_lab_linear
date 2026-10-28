@@ -114,3 +114,28 @@ def test_new_operators_and_synth():
     ch = serial_chains(12, 0)
     assert {c["level"] for c in ch} == {3, 4, 5, 6, 7, 8} and all(c["gold"] > 0 for c in ch)
     assert all(b["question"].startswith("Compute") for b in bbh_arithmetic(5, 0))
+
+
+def test_strict_number_rejects_symbolic_golds():
+    from errprop.labels import strict_number
+    assert strict_number("\\frac{3}{4}") == 0.75 and strict_number("1,234") == 1234
+    assert strict_number("12\\text{ cm}") == 12 and strict_number("\\$15.50") == 15.5
+    for bad in ("\\sqrt{2}", "3\\pi", "x^2+1", "(1,2)"):
+        assert strict_number(bad) is None, bad
+
+
+def test_mention_injection_and_tolerance():
+    from errprop.arith import mention_injections
+    from errprop.labels import label_continuation
+    body = "The Battle of Hastings was fought in 1066 in England.\n"
+    inj = mention_injections(body, 1066.0, [], ("plus_one", "times_ten"), seed=1)
+    assert {i.kind for i, _, _ in inj} == {"plus_one", "times_ten"}
+    i, a, b = inj[0]
+    assert body[a:b] == "1066" and i.propagated_answer == i.new_value
+    d = {**i.__dict__, "tol": 1e-4}
+    assert label_continuation(f" so.\n#### {i.new_text}", 1066.0, d)["outcome"] == "FOLLOW"
+    assert label_continuation(" no, 1066.\n#### 1066", 1066.0, d)["outcome"] == "RECOVER"
+    assert mention_injections("In 1066 ...", 1066.0, [1066.0]) == []      # value given in the question
+    # 2% tolerance (MMLU-Pro): 3.19 counts as gold 3.2
+    d2 = {"propagated_answer": 6.4, "new_value": 4.0, "changed_values": [6.4], "true_value": 2.0, "tol": 0.02}
+    assert label_continuation("#### 3.19", 3.2, d2)["outcome"] == "RECOVER"

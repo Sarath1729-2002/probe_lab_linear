@@ -1,6 +1,8 @@
 """Text generation: vLLM when available, plain transformers otherwise."""
 from __future__ import annotations
 
+import os
+
 
 class Generator:
     def __init__(self, cfg: dict):
@@ -9,9 +11,12 @@ class Generator:
         self.backend = g["backend"]
         if self.backend == "vllm":
             from vllm import LLM
+            from transformers import AutoTokenizer
             self.llm = LLM(model=cfg["model"], dtype="bfloat16", seed=cfg["seed"],
                            max_model_len=g["max_model_len"], gpu_memory_utilization=g["gpu_mem"])
-            self.tokenizer = self.llm.get_tokenizer()
+            # Prompts are rendered and encoded with the HF tokenizer for every model (vLLM may load
+            # Mistral's own tokenizer, whose interface differs). `extract` uses the same tokenizer.
+            self.tokenizer = AutoTokenizer.from_pretrained(cfg["model"])
         else:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -20,31 +25,35 @@ class Generator:
             if self.tokenizer.pad_token is None:
                 self.tokenizer.pad_token = self.tokenizer.eos_token
             self.model = AutoModelForCausalLM.from_pretrained(
-                cfg["model"], torch_dtype=torch.bfloat16, device_map="cuda").eval()
+                cfg["model"], dtype=torch.bfloat16, device_map=os.environ.get("ERRPROP_DEVICE", "cuda")).eval()
 
     def generate(self, prompts: list[str], n: int, temperature: float, max_tokens: int,
-                 seed: int = 0) -> list[list[str]]:
+                 seed: int = 0, top_p: float | None = None) -> list[list[str]]:
         """Returns one list of `n` completions per prompt. temperature 0 means greedy."""
+        top_p = self.cfg["gen"]["top_p"] if top_p is None else top_p
         if self.backend == "vllm":
             from vllm import SamplingParams
             sp = SamplingParams(n=n, temperature=temperature,
-                                top_p=self.cfg["gen"]["top_p"] if temperature > 0 else 1.0,
+                                top_p=top_p if temperature > 0 else 1.0,
                                 max_tokens=max_tokens, seed=seed)
-            outs = self.llm.generate(prompts, sp)
+            # Pass token ids, not strings: the rendered chat template already contains BOS for
+            # Llama/Mistral, and string prompts would get a second one. Same tokenisation as `extract`.
+            ids = [{"prompt_token_ids": self.tokenizer(p, add_special_tokens=False)["input_ids"]} for p in prompts]
+            outs = self.llm.generate(ids, sp)
             return [[o.text for o in r.outputs] for r in outs]
-        return self._hf_generate(prompts, n, temperature, max_tokens, seed)
+        return self._hf_generate(prompts, n, temperature, max_tokens, seed, top_p)
 
-    def _hf_generate(self, prompts, n, temperature, max_tokens, seed, bs=8):
+    def _hf_generate(self, prompts, n, temperature, max_tokens, seed, top_p, bs=8):
         import torch
         torch.manual_seed(seed)
         out = []
         for i in range(0, len(prompts), bs):
             batch = prompts[i:i + bs]
-            enc = self.tokenizer(batch, return_tensors="pt", padding=True, add_special_tokens=False).to("cuda")
+            enc = self.tokenizer(batch, return_tensors="pt", padding=True, add_special_tokens=False).to(self.model.device)
             kw = dict(max_new_tokens=max_tokens, num_return_sequences=n,
                       pad_token_id=self.tokenizer.pad_token_id)
             if temperature > 0:
-                kw.update(do_sample=True, temperature=temperature, top_p=self.cfg["gen"]["top_p"])
+                kw.update(do_sample=True, temperature=temperature, top_p=top_p)
             else:
                 kw.update(do_sample=False)
             with torch.no_grad():

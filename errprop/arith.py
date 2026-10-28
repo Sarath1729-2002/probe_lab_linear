@@ -395,3 +395,42 @@ def numbers_in(text: str) -> list[float]:
         if v is not None:
             vals.append(v)
     return vals
+
+
+def mention_injections(body: str, answer: float, question_numbers: list[float], kinds=OPERATORS,
+                       seed: int = 0) -> list[tuple[Injection, int, int]]:
+    """Injections for answers that are recalled, not computed (TriviaQA: years, counts, heights).
+
+    The site is the FIRST place the reasoning states the answer value before the final line. It is
+    replaced by a corrupted value, i.e. a wrong recalled fact, and the model continues. There is no
+    arithmetic between site and answer, so the FOLLOW target is the injected value itself:
+        FOLLOW  = final answer == injected value     RECOVER = final answer == gold.
+    Skipped when the value also appears in the question (then the model can simply copy it).
+    Returns (injection, char_start, char_end) triples; all operators share the one site."""
+    import random
+    if any(close(answer, v) for v in question_numbers):
+        return []
+    site = None
+    for m in re.finditer(NUM_RE, body):
+        v = to_float(m.group(0))
+        if v is not None and close(v, answer, rel=1e-9):
+            site = m
+            break
+    if site is None:
+        return []
+    out = []
+    for ki, kind in enumerate(k for k in kinds if k != "copy_operand"):
+        rng = random.Random(seed * 1_000_003 + ki)
+        nv = corrupt_value(answer, site.group(0), kind, rng=rng)
+        if nv is None:
+            continue
+        if abs(answer - round(answer)) < 1e-9:
+            nv = float(round(nv))          # recalled integers stay integers (years, counts)
+        if close(nv, answer, rel=1e-4) or any(close(nv, v) for v in question_numbers):
+            continue
+        out.append((Injection(eq_idx=0, kind=kind, true_value=answer, true_text=site.group(0),
+                              new_value=nv, new_text=format_like(nv, site.group(0)), on_path=True,
+                              propagated_answer=nv, changes_answer=True, n_downstream=0,
+                              step_frac=site.start() / max(1, len(body)), changed_values=[nv]),
+                    site.start(), site.end()))
+    return out

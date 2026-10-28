@@ -40,6 +40,31 @@ def parse_number(s: str) -> Optional[float]:
     return None
 
 
+_STRICT = re.compile(r"-?(\d{1,3}(,\d{3})+|\d+)(\.\d+)?|-?\d*\.\d+")
+_STRICT_FRAC = re.compile(r"(-?)\\d?frac\{(-?\d+)\}\{(\d+)\}|(-?\d+)/(\d+)")
+
+
+def strict_number(s: Optional[str]) -> Optional[float]:
+    """Gold answers only: the WHOLE string must be one plain number or a simple fraction, after removing
+    \\text{...}, $, thin spaces, %, ^\\circ. Rejects \\sqrt{2}, 3\\pi, x^2, intervals, tuples."""
+    if s is None:
+        return None
+    s = re.sub(r"\\text\{[^{}]*\}|\\mbox\{[^{}]*\}", "", str(s))
+    for a in ("\\$", "\\!", "\\,", "\\ ", "$", "\\%", "%", "^\\circ", "^{\\circ}", "\\left", "\\right", " "):
+        s = s.replace(a, "")
+    s = s.strip().rstrip(".")
+    if _STRICT.fullmatch(s):
+        return float(s.replace(",", ""))
+    m = _STRICT_FRAC.fullmatch(s)
+    if m:
+        if m.group(2) is not None:
+            v = int(m.group(2)) / int(m.group(3))
+            return -v if m.group(1) else v
+        if int(m.group(5)) != 0:
+            return int(m.group(4)) / int(m.group(5))
+    return None
+
+
 def extract_answer(text: str) -> Optional[float]:
     """Final numeric answer: '#### x', else \\boxed{x}, else 'answer is x', else last number."""
     for rx in (_HASH, _BOXED, _ANSWER_IS):
@@ -54,13 +79,15 @@ def extract_answer(text: str) -> Optional[float]:
     return to_float(nums[-1]) if nums else None
 
 
-def outcome(answer: Optional[float], gold: float, propagated: float) -> str:
-    """FOLLOW / RECOVER / OTHER. 'NA' when the error cannot change the answer (off-path)."""
-    if close(propagated, gold, rel=1e-4):
-        return "NA_RECOVER" if close(answer, gold, rel=1e-4) else "NA_OTHER"
-    if close(answer, propagated, rel=1e-4):
+def outcome(answer: Optional[float], gold: float, propagated: float, tol: float = 1e-4) -> str:
+    """FOLLOW / RECOVER / OTHER. 'NA' when the error cannot change the answer (off-path).
+    `tol` is the dataset's relative answer tolerance (1e-4 exact sets; 2% for MMLU-Pro, whose
+    options are rounded)."""
+    if close(propagated, gold, rel=tol):
+        return "NA_RECOVER" if close(answer, gold, rel=tol) else "NA_OTHER"
+    if close(answer, propagated, rel=tol):
         return "FOLLOW"
-    if close(answer, gold, rel=1e-4):
+    if close(answer, gold, rel=tol):
         return "RECOVER"
     return "OTHER"
 
@@ -103,7 +130,7 @@ def first_mention_char(continuation: str, value: float) -> Optional[int]:
 
 def label_continuation(cont: str, gold: float, inj: dict) -> dict:
     ans = extract_answer(cont)
-    out = outcome(ans, gold, inj["propagated_answer"])
+    out = outcome(ans, gold, inj["propagated_answer"], inj.get("tol", 1e-4))
     wrong = [inj["new_value"]] + [v for v in inj["changed_values"] if not close(v, inj["new_value"])]
     rec = {
         "answer": ans,
@@ -116,6 +143,9 @@ def label_continuation(cont: str, gold: float, inj: dict) -> dict:
         # the prefix ends right after the injected number; if the model keeps writing digits it has
         # changed the number itself (e.g. 84 -> 840), so the item is not what we injected
         "glued": bool(re.match(r"(?:\d|,\d|\.\d)", cont)),
+        # the model read the injected number as the start of a new expression ("= 8 ‖ * 3.5 = 28"),
+        # i.e. it never used it as a result. Seen mostly with copy_operand in fast_v1.
+        "operand_reuse": bool(re.match(r"\s*[\*\+/×÷x]\s*\(?\d|\s*-\s*\(?\d", cont)),
     }
     rec["recovery_type"] = recovery_type(cont, inj["true_value"]) if out in ("RECOVER", "NA_RECOVER") else None
     return rec

@@ -21,7 +21,7 @@ set +eu
 source ~/errprop_env.sh
 set -eu
 echo "python: $(which python)   nvcc: $(which nvcc)   HF_HOME: ${HF_HOME}   offline: ${HF_HUB_OFFLINE:-0}"
-nvidia-smi --query-gpu=name,memory.total --format=csv,noheader | head -1
+nvidia-smi -i 0 --query-gpu=name,memory.total --format=csv,noheader || true
 
 STAGES="${STAGES:-clean inject continue extract probes steer report}"
 for s in $STAGES; do
