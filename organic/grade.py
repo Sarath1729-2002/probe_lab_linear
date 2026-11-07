@@ -6,7 +6,7 @@ from __future__ import annotations
 import ast
 import re
 
-from decide.common import NUM, norm, text_match
+from .common import NUM, norm, text_match
 
 ANS = re.compile(r"answer\s*(?:is)?\s*[:：]\s*(.+)", re.I)
 _SENT = object()

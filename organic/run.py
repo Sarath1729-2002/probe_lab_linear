@@ -8,9 +8,9 @@ from pathlib import Path
 
 import numpy as np
 
-from errprop.io import read_jsonl, write_jsonl
+from .common import read_jsonl, write_jsonl
 
-from decide.common import Reader, chat, layer_list, make_generator
+from .common import Reader, chat, layer_list, make_generator
 
 from .grade import grade
 

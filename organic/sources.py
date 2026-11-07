@@ -7,7 +7,7 @@ import json
 import re
 from pathlib import Path
 
-from errprop.io import write_jsonl
+from .common import write_jsonl
 
 from .grade import boxed
 

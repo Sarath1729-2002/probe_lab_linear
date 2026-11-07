@@ -23,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 
 import numpy as np  # noqa: E402
 
-from errprop.io import load_config, read_jsonl, write_jsonl  # noqa: E402
+from organic.common import load_config, read_jsonl, write_jsonl  # noqa: E402
 from organic.build import build  # noqa: E402
 from organic.fit import stage_fit  # noqa: E402
 from organic.grade import grade  # noqa: E402

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-from errprop.io import read_jsonl
+from .common import read_jsonl
 
 from .run import bdir, root
 

@@ -18,9 +18,9 @@ import random
 from collections import defaultdict
 from pathlib import Path
 
-from errprop.io import read_jsonl, write_jsonl
+from .common import read_jsonl, write_jsonl
 
-from decide.common import norm, text_match
+from .common import norm, text_match
 
 from .grade import boxed, exact_norm, math_equal, _lit, _SENT
 

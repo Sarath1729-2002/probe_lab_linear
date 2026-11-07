@@ -13,7 +13,7 @@ from pathlib import Path
 
 import yaml
 
-from errprop.io import load_config, read_jsonl
+from .common import load_config, read_jsonl
 
 STAGES = ["download", "build", "gen", "extract", "fit", "traj", "report", "shard"]
 

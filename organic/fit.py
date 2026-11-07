@@ -12,9 +12,9 @@ from collections import defaultdict
 
 import numpy as np
 
-from errprop.io import read_jsonl
+from .common import read_jsonl
 
-from decide.common import MassMean, auc, best_layer, boot_ci, group_split, logistic, oof_scores
+from .common import MassMean, auc, best_layer, boot_ci, group_split, logistic, oof_scores
 
 from .run import PROBE_FAMILIES, bdir, load, root
 
