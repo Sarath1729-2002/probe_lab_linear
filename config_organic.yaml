@@ -1,0 +1,36 @@
+# Wrong information in the prompt, observed only (see organic/__init__.py).
+#   login node:  python -m organic.cli download build --config config_organic.yaml
+#   compute:     sbatch slurm/organic.sbatch
+run_prefix: organic_v1
+model: Qwen/Qwen2.5-7B-Instruct
+out_dir: ${SCRATCH}/organic_runs          # generations + activations (several GB)
+data_dir: ${SCRATCH}/organic_data         # raw downloads, frozen items.jsonl / variants.jsonl
+report_dir: reports
+seed: 0
+
+buckets:                                  # items per bucket (0 = off). mmlu_pro / cute: per category / task
+  triviaqa: 1500
+  nqswap: 1500
+  truthfulqa: 817                         # all of MC1
+  mmlu_pro: 150                           # x 14 categories
+  processbench: 700                       # erroneous solutions; the same number of correct ones as controls
+  cute: 200                               # x 7 character-level tasks
+  cruxeval: 800                           # all
+
+gen:
+  backend: vllm
+  max_model_len: 6144
+  gpu_mem: 0.85
+  max_tokens: {default: 512, processbench: 1024, cruxeval: 768}
+
+extract:
+  dtype: bfloat16
+  batch: 8
+
+probes:
+  layer_step: 2                           # every 2nd residual layer (+ the last) is stored
+  n_boot: 300
+
+traj:
+  n_items: 200                            # known items per bucket (adopted ones first), both suggestion arms
+  max_tokens: 96                          # reply tokens read
