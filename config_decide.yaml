@@ -1,0 +1,38 @@
+# Decision run: three cheap experiments, each with a kill criterion (see decide/report.py).
+#   login node:  HF_HUB_OFFLINE=0 python scripts/prepare_decide.py
+#   compute:     sbatch slurm/decide.sbatch
+run_prefix: decide_v1
+out_dir: ${SCRATCH}/decide_runs
+data_dir: ${SCRATCH}/decide_data
+report_dir: reports
+paper_out_dir: ${SCRATCH}/errprop_runs      # A1 reuses the paper_v1 activations, no GPU
+paper_run_prefix: paper_v1
+seed: 0
+
+models:                                      # R1-Distill left out: long traces, and A1 showed it is the odd one
+  - {tag: qwen7b,    short: Qwen2.5-7B,   name: Qwen/Qwen2.5-7B-Instruct}
+  - {tag: llama8b,   short: Llama-3.1-8B, name: meta-llama/Llama-3.1-8B-Instruct}
+  - {tag: mistral7b, short: Mistral-7B,   name: mistralai/Mistral-7B-Instruct-v0.3}
+
+gen:
+  backend: vllm
+  max_model_len: 4096
+  gpu_mem: 0.85
+
+probes:
+  layer_step: 2                              # every 2nd layer is stored and scanned
+
+a2:                                          # same corrupted working, attributed to the user
+  n_items: 1500
+  max_tokens: 512
+  batch: 8
+
+b:                                           # knowledge confound
+  popqa_n: 4000                              # stratified over 10 popularity deciles
+  know_max_tokens: 48
+  batch: 32
+
+c:                                           # silent-acceptance gate
+  max_tokens: 384
+  batch: 16
+  gate: 0.15                                 # need >= 15% adopt AND >= 15% reject/override

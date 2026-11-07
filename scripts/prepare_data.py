@@ -104,59 +104,110 @@ def mmlu_pro():
 
 
 # ----------------------------------------------------------------------------- OpenThoughts (math, 1k)
+def _try_sources(name, sources, collect):
+    """Try each (label, loader) END TO END: a source that fails while being read (network, schema)
+    falls through to the next. Prints the full error of each failure."""
+    import traceback
+    last = None
+    for label, loader in sources:
+        print(f"   [{name}] trying {label}", flush=True)
+        try:
+            rows, cols = collect(loader())
+            if rows:
+                return rows, cols
+            print(f"   [{name}] {label}: 0 rows after filtering", flush=True)
+        except Exception as e:
+            last = e
+            print(f"   [{name}] {label} FAILED:", flush=True)
+            traceback.print_exc(limit=3)
+    raise RuntimeError(f"all sources failed for {name}: {type(last).__name__ if last else 'no rows'}")
+
+
 def openthoughts(n=1000):
-    def meta():
-        ds = load_dataset("open-thoughts/OpenThoughts-114k", "metadata", split="train", streaming=True)
-        return ds, lambda r: r.get("domain") == "math", \
-            lambda r: boxed(r.get("ground_truth_solution")) if boxed(r.get("ground_truth_solution")) is not None \
-            else boxed(r.get("deepseek_solution")), lambda r: r["problem"]
+    def ot_meta(ds):                      # metadata config: problem, domain, ground_truth_solution, ...
+        rows, cols = [], None
+        for i, r in enumerate(ds):
+            cols = cols or list(r.keys())
+            if r.get("domain") != "math":
+                continue
+            g = boxed(r.get("ground_truth_solution"))
+            g = g if g is not None else boxed(r.get("deepseek_solution"))
+            if g is None:
+                continue
+            rows.append({"id": f"openthoughts-{i}", "dataset": "openthoughts", "level": 0, "subject": r.get("source"),
+                         "question": r["problem"], "gold": g, "group": f"openthoughts-{i}", "tol": 1e-4})
+            if len(rows) >= n:
+                break
+        return rows, cols
 
-    def default():
-        ds = load_dataset("open-thoughts/OpenThoughts-114k", split="train", streaming=True)
-        conv = lambda r: r["conversations"]                                       # noqa: E731
-        return ds, lambda r: "\\boxed" in conv(r)[-1]["value"], lambda r: boxed(conv(r)[-1]["value"]), \
-            lambda r: conv(r)[0]["value"]
+    def ot_default(ds):                   # default config: system + conversations [user, assistant]
+        rows, cols = [], None
+        for i, r in enumerate(ds):
+            cols = cols or list(r.keys())
+            conv = r.get("conversations") or []
+            if len(conv) < 2:
+                continue
+            g = boxed(conv[-1].get("value"))
+            if g is None:
+                continue
+            rows.append({"id": f"openthoughts-{i}", "dataset": "openthoughts", "level": 0,
+                         "question": conv[0].get("value"), "gold": g, "group": f"openthoughts-{i}", "tol": 1e-4})
+            if len(rows) >= n:
+                break
+        return rows, cols
 
-    ds, keep, gold, question = first_ok([meta, default])
-    ds = ds.shuffle(seed=0, buffer_size=20_000)
-    rows, cols = [], None
-    for i, r in enumerate(ds):
-        cols = cols or list(r.keys())
-        if not keep(r):
-            continue
-        g = gold(r)
-        if g is None:
-            continue
-        rows.append({"id": f"openthoughts-{i}", "dataset": "openthoughts", "level": 0, "subject": r.get("source"),
-                     "question": question(r), "gold": g, "group": f"openthoughts-{i}", "tol": 1e-4})
-        if len(rows) >= n:
+    sh = lambda ds: ds.shuffle(seed=0, buffer_size=20_000) if hasattr(ds, "shuffle") else ds   # noqa: E731
+    rows, cols = None, None
+    for label, loader, coll in [
+            ("metadata, streaming", lambda: sh(load_dataset("open-thoughts/OpenThoughts-114k", "metadata", split="train", streaming=True)), ot_meta),
+            ("metadata, download", lambda: load_dataset("open-thoughts/OpenThoughts-114k", "metadata", split="train").shuffle(seed=0), ot_meta),
+            ("default, streaming", lambda: sh(load_dataset("open-thoughts/OpenThoughts-114k", split="train", streaming=True)), ot_default),
+            ("default, download", lambda: load_dataset("open-thoughts/OpenThoughts-114k", split="train").shuffle(seed=0), ot_default)]:
+        try:
+            rows, cols = _try_sources("openthoughts", [(label, loader)], coll)
             break
+        except RuntimeError:
+            continue
+    if not rows:
+        raise RuntimeError("OpenThoughts: every source failed (see errors above)")
     save("openthoughts", rows, cols)
 
 
 # ----------------------------------------------------------------------------- TriviaQA (numeric)
 def triviaqa(n=4000):
-    ds = first_ok([lambda: load_dataset("mandarjoshi/trivia_qa", "rc.nocontext", split="validation", streaming=True),
-                   lambda: load_dataset("trivia_qa", "rc.nocontext", split="validation", streaming=True)])
-    rows, cols = [], None
-    for i, r in enumerate(ds):
-        cols = cols or list(r.keys())
-        a = r["answer"]
-        cands = [a.get("value", "")] + list(a.get("aliases", []))
-        num = next((c.strip() for c in cands if PLAIN_NUM.match(c.strip())), None)
-        if num is None:
-            continue
-        g = float(num.replace(",", ""))
-        rows.append({"id": f"triviaqa-{r.get('question_id', i)}", "dataset": "triviaqa", "level": 0,
-                     "question": r["question"], "gold": g, "group": f"triviaqa-{r.get('question_id', i)}",
-                     "tol": 1e-4, "answer_value": a.get("value")})
-        if len(rows) >= n:
-            break
+    def coll(ds):
+        rows, cols = [], None
+        for i, r in enumerate(ds):
+            cols = cols or list(r.keys())
+            a = r["answer"]
+            cands = [a.get("value", "")] + list(a.get("aliases", []))
+            num = next((c.strip() for c in cands if PLAIN_NUM.match(c.strip())), None)
+            if num is None:
+                continue
+            g = float(num.replace(",", ""))
+            rows.append({"id": f"triviaqa-{r.get('question_id', i)}", "dataset": "triviaqa", "level": 0,
+                         "question": r["question"], "gold": g, "group": f"triviaqa-{r.get('question_id', i)}",
+                         "tol": 1e-4, "answer_value": a.get("value")})
+            if len(rows) >= n:
+                break
+        return rows, cols
+
+    rows, cols = _try_sources("triviaqa", [
+        ("mandarjoshi/trivia_qa rc.nocontext, streaming",
+         lambda: load_dataset("mandarjoshi/trivia_qa", "rc.nocontext", split="validation", streaming=True)),
+        ("mandarjoshi/trivia_qa unfiltered.nocontext, streaming",
+         lambda: load_dataset("mandarjoshi/trivia_qa", "unfiltered.nocontext", split="validation", streaming=True)),
+        ("mandarjoshi/trivia_qa rc.nocontext, download",
+         lambda: load_dataset("mandarjoshi/trivia_qa", "rc.nocontext", split="validation")),
+    ], coll)
     save("triviaqa", rows, cols)
 
 
-for name, fn in [("math_full", math_full), ("mmlu_pro", mmlu_pro), ("openthoughts", openthoughts),
-                 ("triviaqa", triviaqa)]:
+ALL = [("math_full", math_full), ("mmlu_pro", mmlu_pro), ("openthoughts", openthoughts), ("triviaqa", triviaqa)]
+ONLY = [x for x in os.environ.get("ONLY", "").split(",") if x]       # e.g. ONLY=openthoughts,triviaqa
+for name, fn in ALL:
+    if ONLY and name not in ONLY:
+        continue
     print(f"== {name}", flush=True)
     try:
         fn()

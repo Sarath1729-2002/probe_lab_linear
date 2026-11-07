@@ -15,6 +15,7 @@
 #   sbatch slurm/paper.sbatch                              # all cached models in config_paper.yaml
 #   MODELS="qwen7b r1qwen7b" sbatch slurm/paper.sbatch       # a subset
 #   STAGES="fit trajectory" sbatch slurm/paper.sbatch      # resume (finished files are reused)
+#   SETS="run_prefix=paper_v1b data.chains_n=0" sbatch ...   # extra config overrides for every stage
 #   (H200 node: sbatch --gpus-per-node=h200:8 --cpus-per-task=64 slurm/paper.sbatch)
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR}"
@@ -56,7 +57,7 @@ chain() {    # $1 tag, $2 gpu index
   for s in $STAGES; do
     echo "== $(date '+%H:%M:%S') [$t] stage $s"
     t0=$(date +%s)
-    if ! CUDA_VISIBLE_DEVICES=$g python -m errprop.cli "$s" --config $CFG --model "$t" --set probes.n_jobs=$NJ \
+    if ! CUDA_VISIBLE_DEVICES=$g python -m errprop.cli "$s" --config $CFG --model "$t" --set probes.n_jobs=$NJ ${SETS:-} \
          > "logs/ep_${t}-${SLURM_JOB_ID}-${s}.log" 2>&1; then
       echo "!! [$t] stage $s FAILED (logs/ep_${t}-${SLURM_JOB_ID}-${s}.log)"; tail -5 "logs/ep_${t}-${SLURM_JOB_ID}-${s}.log"
       [ "$s" = trajectory ] && continue     # trajectory is a figure; the tables don't need it
@@ -75,5 +76,5 @@ for t in "${RUN[@]}"; do
 done
 wait
 echo "== $(date '+%H:%M:%S') writing report"
-python -m errprop.cli paper --config $CFG || echo "!! paper failed; rerun on login node: python -m errprop.cli paper --config $CFG"
+python -m errprop.cli paper --config $CFG --set ${SETS:-} || echo "!! paper failed; rerun on login node: python -m errprop.cli paper --config $CFG"
 echo "ALL DONE $(date)   report: reports/paper_v1/PAPER.md"

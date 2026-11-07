@@ -515,7 +515,7 @@ def write_paper(cfg):
          f"When a wrong value enters a model's chain of thought, the model either carries it to a wrong answer "
          f"(FOLLOW) or reaches the right answer anyway (RECOVER). We ask whether the residual stream at the moment "
          f"the wrong value is written already encodes which of the two will happen. We inject deterministic errors into "
-         f"each model's own solutions (a wrong computed value, or for TriviaQA a wrong recalled fact), label every "
+         f"each model's own solutions ({'a wrong computed value, or for TriviaQA a wrong recalled fact' if 'triviaqa' in cols else 'a wrong computed value'}), label every "
          f"continuation exactly (no human or LLM judge), and train minimal-capacity linear probes on frozen hidden states "
          f"of {len(runs)} open-weight 7–8B models across {n_ds} datasets, mirroring the paper's probe family, statistical "
          f"floors, cross-dataset matrices and aggregate event analysis. Pooled over datasets, the error-token probe "
@@ -524,8 +524,10 @@ def write_paper(cfg):
          f"{_f(max(pos), 2)} for a probe at the last prompt token. Over {ic['cells']} (model, dataset) cells it beats the "
          f"black-box predictor in {ic['et_gt_blackbox']}, the prompt-only probe in {ic['et_gt_prompt']}, and the "
          f"prompt-only probe combined with all error features in {ic['et_gt_prompt_struct']}. The prompt-only probe beats "
-         f"the constant floor in {ic['po_beats_const_brier']} of {ic['cells']} cells: part of a problem's susceptibility "
-         f"is readable before any reasoning is written."
+         f"the constant floor (Brier) in {ic['po_beats_const_brier']} of {ic['cells']} cells"
+         + (": part of a problem's susceptibility is readable before any reasoning is written."
+            if ic['po_beats_const_brier'] > ic['cells'] / 2 else
+            ": unlike output length in the paper, the outcome is not usefully decodable before reasoning starts.")
          + (f" Probes trained on natural datasets beat the eval dataset's own floor on {asym_tot['natural'][0]} of "
             f"{asym_tot['natural'][1]} off-diagonal transfer cells, synthetic-trained probes on {asym_tot['synthetic'][0]} of "
             f"{asym_tot['synthetic'][1]} (one-sided Fisher p = {asym_p:.1e})." if asym_p is not None else "")
