@@ -8,8 +8,9 @@ import re
 
 from .common import NUM, norm, text_match
 
-ANS = re.compile(r"answer\s*(?:is)?\s*[:：]\s*(.+)", re.I)
+ANS = re.compile(r"answer\s*(?:is)?[ \t]*[:：][ \t]*(.*)", re.I)   # same line only
 _SENT = object()
+NEG = re.compile(r"\b(?:not|isn't|wasn't|aren't|weren't|incorrect|wrong|rather than|instead of|mistaken)\b", re.I)
 
 
 def boxed(s: str | None) -> str | None:
@@ -32,24 +33,38 @@ def boxed(s: str | None) -> str | None:
     return None
 
 
-def final_answer(text: str | None) -> str | None:
-    if text is None:
-        return None
-    m = ANS.findall(text)
-    if m:
-        a = m[-1]
-    else:
-        b = boxed(text)
-        if b is not None:
-            return b.strip()
-        lines = [l for l in text.strip().splitlines() if l.strip()]
-        a = lines[-1] if lines else ""
-    a = a.strip().strip("*`").strip()
+def _clean(a: str) -> str:
+    a = a.strip()
+    for _ in range(3):                                   # "**Answer:** `Answer: X`" and similar
+        a = a.strip().strip("*`").strip()
+        a = re.sub(r"^(?:final\s+)?answer\s*(?:is)?\s*[:：]\s*", "", a, flags=re.I)
     b = boxed(a)
     if b is not None:
         a = b
-    a = re.sub(r"^\$+|\$+$", "", a).strip().rstrip(".").strip()
-    return a
+    a = re.sub(r"^\\[\[(]\s*|\s*\\[\])]$", "", a.strip())   # \( x \)  \[ x \]
+    a = re.sub(r"^\$+|\$+$", "", a.strip()).strip()
+    return a.rstrip(".").strip()
+
+
+def final_answer(text: str | None) -> str | None:
+    if text is None:
+        return None
+    m = list(ANS.finditer(text))
+    if m:
+        a = _clean(m[-1].group(1))
+        if not a or a in ("\\[", "$$", "\\(", "\\"):     # answer on the following line(s)
+            rest = text[m[-1].end():]
+            b = boxed(rest)
+            if b is not None:
+                return _clean(b)
+            nxt = [l for l in rest.splitlines() if l.strip() and l.strip() not in ("\\[", "\\]", "$$")]
+            a = _clean(nxt[0]) if nxt else ""
+        return a
+    b = boxed(text)
+    if b is not None:
+        return _clean(b)
+    lines = [l for l in text.strip().splitlines() if l.strip()]
+    return _clean(lines[-1]) if lines else ""
 
 
 # ---------------------------------------------------------------------------- per type
@@ -153,10 +168,16 @@ def grade(item: dict, text: str | None) -> tuple[str, str | None]:
     n = item.get("n_options", 10)
     g = _match(item["type"], a, item["gold"], n)
     w = _match(item["type"], a, item.get("wrong"), n)
-    if g and w and item["type"] == "text":            # both alias sets hit: decide on exact equality
-        na = norm(a)
-        g = any(norm(x) == na for x in item["gold"])
-        w = any(norm(x) == na for x in item["wrong"]) and not g
+    if g and w and item["type"] == "text":            # both hit: drop clauses that reject an answer, then exact
+        kept = " ".join(c for c in re.split(r"(?<=[.;!?])\s+|,\s*(?=(?:but|not)\b)", a) if not NEG.search(c))
+        if kept:
+            g2, w2 = text_match(kept, item["gold"]), text_match(kept, item["wrong"])
+            if g2 != w2:
+                g, w = g2, w2
+        if g and w:
+            na = norm(a)
+            g = any(norm(x) == na for x in item["gold"])
+            w = any(norm(x) == na for x in item["wrong"]) and not g
     if g and not w:
         return "GOLD", a
     if w and not g:

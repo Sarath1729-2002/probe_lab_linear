@@ -28,7 +28,9 @@ from organic.build import build  # noqa: E402
 from organic.fit import stage_fit  # noqa: E402
 from organic.grade import grade  # noqa: E402
 from organic.report import write_report  # noqa: E402
-from organic.run import bdir, stage_extract, stage_gen  # noqa: E402
+from organic.run import bdir, stage_confidence, stage_extract, stage_gen, stage_regrade  # noqa: E402
+from organic.build import rebuild_variants  # noqa: E402
+from organic.grade import final_answer  # noqa: E402
 from organic.traj import stage_traj  # noqa: E402
 
 
@@ -87,7 +89,17 @@ def main(tiny: str):
     assert grade(cx, f"Answer: `{cx['gold']}`")[0] == "GOLD"
 
     buckets = sorted({it["bucket"] for it in items})
+    # grader regressions found on Qwen's real replies in organic_v1
+    assert final_answer("Therefore, the answer is:\n\nAnswer: 'seiq d'") == "'seiq d'"
+    assert final_answer("Answer: \\(\\frac{1023}{1024}\\)") == "\\frac{1023}{1024}"
+    assert final_answer("Thus:\n\nAnswer:\n\\[\n\\boxed{-\\frac{8}{3}}\n\\]") == "-\\frac{8}{3}"
+    nq = next(it for it in items if it["bucket"] == "nqswap")
+    assert grade(nq, f"Answer: {nq['wrong_text']} is not correct. It was {nq['gold_text']}.")[0] == "GOLD"
+    rebuild_variants(dd)                                     # same items -> same prompts, no error
     stage_gen(cfg, buckets)                                  # real generation path (hf backend)
+    stage_gen(cfg, buckets)                                  # incremental: nothing new
+    stage_regrade(cfg, buckets)
+    stage_confidence(cfg, buckets)
     # plant outcomes: 70% known; wrong suggestion adopted by a third of known items
     adopt = {}
     for b in buckets:
@@ -105,7 +117,13 @@ def main(tiny: str):
                 r["outcome"] = "GOLD"
             r["text"] = r["text"] or "x"
         write_jsonl(bdir(cfg, b) / "gen.jsonl", rows)
+    for b in buckets:                                        # plant: shaky knowledge -> more adoption
+        rows = read_jsonl(bdir(cfg, b) / "confidence.jsonl")
+        for r in rows:
+            r["conf"] = 0.4 if adopt.get(r["item"]) and random.Random(r["item"] + "c").random() < 0.6 else 1.0
+        write_jsonl(bdir(cfg, b) / "confidence.jsonl", rows)
     stage_extract(cfg, buckets)
+    stage_extract(cfg, buckets)                              # incremental: nothing new
     nr = np.random.default_rng(0)
     for b in buckets:
         d = bdir(cfg, b)
@@ -130,7 +148,10 @@ def main(tiny: str):
         assert a1["flagged_adopted"] < a1["flagged_held"] and a1["detection_score_predicts_adopt_auroc"] < 0.4, (b, a1)
     assert "matrix_train_row_test_col" in R["transfer"], R["transfer"]
     txt = out.read_text()
-    for must in ("## Data", "## Behaviour on known items", "## Does the model register", "## One signal",
+    cc = R["buckets"]["triviaqa"]["probes"]["sugg"]["info_end"]["confidence_control"]
+    print("confidence control (triviaqa, info end):", cc)
+    assert cc["auroc_confidence_only"] > 0.6, cc
+    for must in ("## Is adoption just weak knowledge?", "## Data", "## Behaviour on known items", "## Does the model register", "## One signal",
                  "## From the suggestion to the answer", "work_trunc", "doc"):
         assert must in txt, must
     assert (out.parent / "fig_transfer.png").exists() and (out.parent / "fig_trajectory.png").exists()

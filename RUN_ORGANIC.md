@@ -51,6 +51,16 @@ Then rerun `build` without `--buckets`, so the frozen set includes every bucket.
 STAGES="fit report" sbatch slurm/organic.sbatch
 ```
 
+## v2 update (on the same items and replies)
+
+```bash
+cd ~/probe_lab_linear && rm -rf organic && tar xzf ~/organic_overlay.tgz
+source ~/errprop_env.sh
+python -m organic.cli variants regrade --config config_organic.yaml   # login node, CPU, ~1 min
+sbatch slurm/organic.sbatch                                           # new work: confidence, the check-my-working
+                                                                      # control, NQ-Swap/TruthfulQA probes, per-position probes
+```
+
 ## Where things land
 
 | What | Path |

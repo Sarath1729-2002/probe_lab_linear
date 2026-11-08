@@ -1,7 +1,8 @@
 """python -m organic.cli <stage> [<stage> ...] [--config config_organic.yaml] [--buckets b1 b2 ...] [--set k=v ...]
 
 Login node (internet):  download   build
-GPU:                    gen   extract   traj        (--buckets limits them; default all)
+Login node (CPU):       variants   (new prompt families on the SAME items.jsonl)   regrade
+GPU:                    gen   confidence   extract   traj        (--buckets limits them; default all)
 CPU:                    fit   report
 Helper:                 shard --n 4                  (prints one bucket list per GPU)
 """
@@ -15,7 +16,7 @@ import yaml
 
 from .common import load_config, read_jsonl
 
-STAGES = ["download", "build", "gen", "extract", "fit", "traj", "report", "shard"]
+STAGES = ["download", "build", "variants", "regrade", "gen", "confidence", "extract", "fit", "traj", "report", "shard"]
 
 
 def main():
@@ -41,6 +42,15 @@ def main():
         elif s == "build":
             from .build import build
             build(cfg, dd, Path(os.path.expandvars(cfg["report_dir"])) / cfg["run_prefix"] / "SAMPLES.md")
+        elif s == "variants":
+            from .build import rebuild_variants
+            rebuild_variants(dd, Path(os.path.expandvars(cfg["report_dir"])) / cfg["run_prefix"] / "SAMPLES.md", cfg["seed"])
+        elif s == "regrade":
+            from .run import stage_regrade
+            stage_regrade(cfg, bks)
+        elif s == "confidence":
+            from .run import stage_confidence
+            stage_confidence(cfg, bks)
         elif s == "gen":
             from .run import stage_gen
             stage_gen(cfg, bks)

@@ -1,20 +1,21 @@
-"""GPU stages. Nothing is edited: greedy generation from the frozen prompts, then a read-only forward
-pass to store residual-stream states at two positions per prompt."""
+"""GPU stages. Nothing is edited: greedy generation from the frozen prompts, sampled re-answers of the
+bare question (knowledge strength), and read-only forward passes that store residual-stream states.
+
+Every stage is incremental: rerunning only computes prompts that are new since the last run (e.g. a
+variant family added to build.py), and keeps everything already on disk."""
 from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 
-from .common import read_jsonl, write_jsonl
-
-from .common import Reader, chat, layer_list, make_generator
-
+from .common import Reader, chat, layer_list, make_generator, read_jsonl, write_jsonl
 from .grade import grade
 
-PROBE_FAMILIES = ("sugg", "doc", "work_full", "work_trunc")
+PROBE_FAMILIES = ("sugg", "doc", "work_full", "work_check", "work_trunc")
 
 
 def root(cfg) -> Path:
@@ -39,16 +40,30 @@ def load(cfg):
     return items, V
 
 
+def _check_items(cfg, b, items):
+    """A rebuilt items.jsonl must match the one the existing replies were graded against."""
+    p = bdir(cfg, b) / "items_fingerprint.json"
+    fp = {i: [it["question"][:80], str(it["gold"])[:40]] for i, it in items.items() if it["bucket"] == b}
+    if p.exists():
+        old = json.load(open(p))
+        bad = [i for i in old if i in fp and old[i] != fp[i]]
+        if bad:
+            raise SystemExit(f"[{b}] items.jsonl changed for {len(bad)} existing ids (e.g. {bad[0]}); "
+                             "use a new run_prefix instead of mixing item sets")
+    json.dump(fp, open(p, "w"))
+
+
 def stage_gen(cfg: dict, buckets: list[str]) -> None:
     items, V = load(cfg)
     gen = None
     for b in buckets:
+        _check_items(cfg, b, items)
         out = bdir(cfg, b) / "gen.jsonl"
-        if out.exists():
-            print(f"[gen] {b}: done already")
-            continue
-        vb = [v for v in V if v["bucket"] == b]
+        old = read_jsonl(out) if out.exists() else []
+        have = {r["vid"] for r in old}
+        vb = [v for v in V if v["bucket"] == b and v["vid"] not in have]
         if not vb:
+            print(f"[gen] {b}: nothing new ({len(old)} prompts on disk)")
             continue
         if gen is None:
             gen = make_generator(cfg, cfg["model"])
@@ -67,11 +82,60 @@ def stage_gen(cfg: dict, buckets: list[str]) -> None:
         for v, t, o in zip(vb, texts, ok):
             oc, a = grade(items[v["item"]], t) if o else ("SKIP", None)
             rows.append({"vid": v["vid"], "text": t, "answer": a, "outcome": oc})
-        write_jsonl(out, rows)
-        c = {}
+        write_jsonl(out, old + rows)
+        print(f"[gen] {b}: {len(rows)} new prompts {dict(Counter(r['outcome'] for r in rows))}", flush=True)
+
+
+def stage_regrade(cfg: dict, buckets: list[str]) -> None:
+    """Re-grade every stored reply with the current grader. The first grade is kept as outcome_v0."""
+    items, _ = load(cfg)
+    for b in buckets:
+        p = bdir(cfg, b) / "gen.jsonl"
+        if not p.exists():
+            continue
+        rows = read_jsonl(p)
+        moved = Counter()
         for r in rows:
-            c[r["outcome"]] = c.get(r["outcome"], 0) + 1
-        print(f"[gen] {b}: {len(rows)} prompts {c}", flush=True)
+            r.setdefault("outcome_v0", r["outcome"])
+            if r["outcome"] == "SKIP":
+                continue
+            oc, a = grade(items[r["vid"].split("|")[0]], r["text"])
+            moved[(r["outcome"], oc)] += r["outcome"] != oc
+            r["outcome"], r["answer"] = oc, a
+        write_jsonl(p, rows)
+        ch = {f"{a}->{c}": n for (a, c), n in moved.items() if n}
+        print(f"[regrade] {b}: {len(rows)} replies; changed {sum(moved.values())}: {ch}", flush=True)
+
+
+def stage_confidence(cfg: dict, buckets: list[str]) -> None:
+    """Knowledge strength: the bare question answered k more times at temperature T. conf = share correct."""
+    items, V = load(cfg)
+    k, T = cfg["confidence"]["n_samples"], cfg["confidence"]["temperature"]
+    gen = None
+    for b in buckets:
+        out = bdir(cfg, b) / "confidence.jsonl"
+        old = read_jsonl(out) if out.exists() else []
+        have = {r["item"] for r in old}
+        vb = [v for v in V if v["bucket"] == b and v["family"] == "base" and v["item"] not in have]
+        if not vb:
+            print(f"[confidence] {b}: nothing new")
+            continue
+        if gen is None:
+            gen = make_generator(cfg, cfg["model"])
+        tok = gen.tokenizer
+        mt = cfg["gen"]["max_tokens"].get(b, cfg["gen"]["max_tokens"]["default"])
+        prompts = [chat(tok, v["user"]) for v in vb]
+        lim = cfg["gen"]["max_model_len"] - mt
+        keep = [i for i, p in enumerate(prompts) if len(tok(p, add_special_tokens=False)["input_ids"]) <= lim]
+        res = gen.generate([prompts[i] for i in keep], k, T, mt, cfg["seed"] + 1)
+        rows = []
+        for i, outs in zip(keep, res):
+            it = items[vb[i]["item"]]
+            g = [grade(it, t)[0] for t in outs]
+            rows.append({"item": it["id"], "conf": sum(x == "GOLD" for x in g) / len(g),
+                         "wrong_rate": sum(x == "WRONG" for x in g) / len(g)})
+        write_jsonl(out, old + rows)
+        print(f"[confidence] {b}: {len(rows)} items, mean conf {np.mean([r['conf'] for r in rows]):.2f}", flush=True)
 
 
 def stage_extract(cfg: dict, buckets: list[str]) -> None:
@@ -79,14 +143,17 @@ def stage_extract(cfg: dict, buckets: list[str]) -> None:
     R = None
     for b in buckets:
         d = bdir(cfg, b)
-        if (d / "acts.npy").exists():
-            print(f"[extract] {b}: done already")
-            continue
         if not (d / "gen.jsonl").exists():
             print(f"[extract] {b}: no gen.jsonl, skipped")
             continue
         G = {r["vid"]: r for r in read_jsonl(d / "gen.jsonl")}
-        vb = [v for v in V if v["bucket"] == b and v["family"] in PROBE_FAMILIES and G[v["vid"]]["outcome"] != "SKIP"]
+        old_v = json.load(open(d / "acts_index.json"))["vids"] if (d / "acts.npy").exists() else []
+        have = set(old_v)
+        vb = [v for v in V if v["bucket"] == b and v["family"] in PROBE_FAMILIES and v["vid"] in G
+              and G[v["vid"]]["outcome"] != "SKIP" and v["vid"] not in have]
+        if not vb:
+            print(f"[extract] {b}: nothing new ({len(old_v)} prompts on disk)")
+            continue
         if R is None:
             R = Reader(cfg["model"], cfg["extract"]["dtype"])
             L = layer_list(R.n_layers, cfg["probes"]["layer_step"])
@@ -101,7 +168,10 @@ def stage_extract(cfg: dict, buckets: list[str]) -> None:
                       bs=cfg["extract"]["batch"])
         inv = np.empty_like(order)
         inv[order] = np.arange(len(order))
-        np.save(d / "acts.npy", H[inv])
-        json.dump({"vids": [v["vid"] for v in vb], "layers": L, "positions": ["info_end", "last_prompt_token"]},
+        H = H[inv]
+        if old_v:
+            H = np.concatenate([np.load(d / "acts.npy"), H])
+        np.save(d / "acts.npy", H)
+        json.dump({"vids": old_v + [v["vid"] for v in vb], "layers": L, "positions": ["info_end", "last_prompt_token"]},
                   open(d / "acts_index.json", "w"))
-        print(f"[extract] {b}: {len(vb)} prompts x 2 positions x {len(L)} layers", flush=True)
+        print(f"[extract] {b}: {len(vb)} new prompts x 2 positions x {len(L)} layers (total {len(H)})", flush=True)

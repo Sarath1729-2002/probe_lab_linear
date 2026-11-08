@@ -93,7 +93,7 @@ class Reader:
         self.d = self.model.config.hidden_size
 
     def read(self, texts: list[str], layers: list[int], char_ends: list[list[int]] | None = None,
-             add_special: bool = False, bs: int = 16):
+             add_special: bool = False, bs: int = 16, want_nll: bool = False):
         """Returns (H, nll): H[i, p, l, :] = state after the token that ends at char position
         char_ends[i][p] (or the last token when char_ends is None), at layer layers[l];
         nll[i] = mean per-token negative log-likelihood of text i (tokens after the first)."""
@@ -108,15 +108,18 @@ class Reader:
             offs = enc.pop("offset_mapping")
             enc = {k: v.to(self.model.device) for k, v in enc.items()}
             with torch.no_grad():
-                out = self.model(**enc, output_hidden_states=True)
+                # without NLL, run the backbone only: no (batch x tokens x vocab) logits tensor
+                body = getattr(self.model, "model", None) if not want_nll else None
+                out = (body if body is not None else self.model)(**enc, output_hidden_states=True)
             hs = torch.stack([out.hidden_states[l] for l in layers], 1)          # B, L, T, D
             lens = enc["attention_mask"].sum(1)
-            logp = torch.log_softmax(out.logits.float(), -1)
+            logp = torch.log_softmax(out.logits.float(), -1) if want_nll else None
             for j in range(len(batch)):
                 n = int(lens[j])
-                tgt = enc["input_ids"][j, 1:n]
-                lp = logp[j, : n - 1].gather(1, tgt[:, None]).squeeze(1)
-                nll[s + j] = float(-lp.mean()) if n > 1 else 0.0
+                if want_nll:
+                    tgt = enc["input_ids"][j, 1:n]
+                    lp = logp[j, : n - 1].gather(1, tgt[:, None]).squeeze(1)
+                    nll[s + j] = float(-lp.mean()) if n > 1 else 0.0
                 if char_ends is None:
                     idx = [n - 1]
                 else:
@@ -127,6 +130,7 @@ class Reader:
                         idx.append(cand[-1] if cand else n - 1)
                 for p, t in enumerate(idx):
                     H[s + j, p] = hs[j, :, t].float().cpu().numpy().astype(np.float16)
+            del out, hs, logp
         return H, nll
 
 

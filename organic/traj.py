@@ -1,39 +1,48 @@
-"""Token-by-token reading (GPU, read-only): the bucket's detection direction (sugg family, fitted on
-known items where the planted information ends) is projected onto every token from that point,
-through the rest of the prompt, and over the first `max_tokens` tokens of the model's own reply.
-Nothing is changed in the forward pass; the reply is the one generated in `gen`."""
+"""From the suggestion to the answer, done properly: a SEPARATE probe at each position.
+
+v1 projected one direction (fitted where the suggestion ends) onto every later token. A direction
+fitted at one position does not mean the same thing elsewhere, so the curves collapsed to zero
+regardless of what the model did. Here (GPU, read-only) the states of both suggestion arms are stored
+at fixed positions: suggestion end, the midpoint of the remaining prompt, the last prompt token, and
+reply tokens 1, 2, 4, 8, 16, 32, 64. The analysis (CPU) then fits a wrong-vs-right probe at every
+position with grouped out-of-fold scoring, and asks, position by position, how much of the detection
+signal is there for items the model later adopted vs held.
+
+Caveat for reply positions: the two arms' replies differ in content, so from reply token 1 on the
+probe can also read what the model is writing, not only what it registered."""
 from __future__ import annotations
 
+import json
 import random
 
 import numpy as np
 
-from .common import read_jsonl, write_jsonl
-
-from .common import Reader, chat
-
+from .common import MassMean, Reader, auc, chat, oof_scores, read_jsonl
 from .run import bdir, load, root
+
+REPLY = [1, 2, 4, 8, 16, 32, 64]
+POSITIONS = ["suggestion_end", "prompt_mid", "last_prompt_token"] + [f"reply_{t}" for t in REPLY]
 
 
 def stage_traj(cfg: dict, buckets: list[str]) -> None:
-    p = root(cfg) / "directions.npz"
-    if not p.exists():
+    res = json.load(open(root(cfg) / "results.json")) if (root(cfg) / "results.json").exists() else None
+    if res is None:
         print("[traj] run fit first")
         return
-    D = np.load(p)
     items, V = load(cfg)
     vmap = {v["vid"]: v for v in V}
-    T, n_items = cfg["traj"]["max_tokens"], cfg["traj"]["n_items"]
+    n_items = cfg["traj"]["n_items"]
     R = None
     for b in buckets:
-        if f"{b}__w" not in D.files or (bdir(cfg, b) / "traj.jsonl").exists():
+        d = bdir(cfg, b)
+        pr = res["buckets"].get(b, {}).get("probes", {}).get("sugg", {}).get("info_end", {})
+        if "layer" not in pr or (d / "traj_acts.npy").exists():
             continue
-        mu, sd, w, layer = D[f"{b}__mu"], D[f"{b}__sd"], D[f"{b}__w"], int(D[f"{b}__layer"])
-        G = {r["vid"]: r for r in read_jsonl(bdir(cfg, b) / "gen.jsonl")}
+        layers = sorted({pr["layer"], res["buckets"][b]["probes"]["sugg"]["last_prompt_token"].get("layer", pr["layer"])})
+        G = {r["vid"]: r for r in read_jsonl(d / "gen.jsonl")}
         ids = [i for i, it in items.items() if it["bucket"] == b and G.get(f"{i}|base|base", {}).get("outcome") == "GOLD"
-               and f"{i}|sugg|wrong" in G and G[f"{i}|sugg|wrong"]["text"] is not None]
+               and G.get(f"{i}|sugg|wrong", {}).get("text") and G.get(f"{i}|sugg|right", {}).get("text")]
         random.Random(cfg["seed"]).shuffle(ids)
-        # balance adopted and held (adoption is usually the rarer outcome)
         ad = [i for i in ids if G[f"{i}|sugg|wrong"]["outcome"] == "WRONG"]
         ho = [i for i in ids if G[f"{i}|sugg|wrong"]["outcome"] == "GOLD"]
         na = min(len(ad), n_items // 2)
@@ -41,27 +50,72 @@ def stage_traj(cfg: dict, buckets: list[str]) -> None:
         if R is None:
             R = Reader(cfg["model"], cfg["extract"]["dtype"])
         torch = R.torch
-        rows = []
+        body = getattr(R.model, "model", R.model)
+        H = np.full((2 * len(ids), len(POSITIONS), len(layers), R.d), np.nan, np.float16)
+        meta = []
+        k = 0
         for i in ids:
             for role in ("wrong", "right"):
                 vid = f"{i}|sugg|{role}"
-                if vid not in G or G[vid]["text"] is None:
-                    continue
                 v = vmap[vid]
-                pr = chat(R.tok, v["user"])
-                info = pr.rfind(v["user"]) + v["info_end"]
-                full = pr + G[vid]["text"]
-                enc = R.tok(full, return_tensors="pt", add_special_tokens=False, return_offsets_mapping=True)
-                off = enc.pop("offset_mapping")[0].tolist()
-                ends = [e for _, e in off]
+                p = chat(R.tok, v["user"])
+                info = p.rfind(v["user"]) + v["info_end"]
+                enc = R.tok(p + G[vid]["text"], return_tensors="pt", add_special_tokens=False,
+                            return_offsets_mapping=True)
+                ends = [e for _, e in enc.pop("offset_mapping")[0].tolist()]
                 t_info = max([t for t, e in enumerate(ends) if e <= info] or [0])
-                t_last = max([t for t, e in enumerate(ends) if e <= len(pr)] or [0])
-                stop = min(len(ends), t_last + 1 + T)
+                t_last = max([t for t, e in enumerate(ends) if e <= len(p)] or [0])
+                pos = [t_info, (t_info + t_last) // 2, t_last] + [t_last + r for r in REPLY]
+                stop = min(len(ends), t_last + max(REPLY) + 1)
                 with torch.no_grad():
-                    hs = R.model(input_ids=enc["input_ids"][:, :stop].to(R.model.device),
-                                 output_hidden_states=True).hidden_states[layer][0].float().cpu().numpy()
-                s = ((hs - mu) / sd) @ w
-                rows.append({"vid": vid, "role": role, "outcome": G[vid]["outcome"], "layer": layer,
-                             "i_info": int(t_info), "i_last": int(t_last), "scores": s[t_info:].round(4).tolist()})
-        write_jsonl(bdir(cfg, b) / "traj.jsonl", rows)
-        print(f"[traj] {b}: {len(rows)} prompts at layer {layer}", flush=True)
+                    hs = body(input_ids=enc["input_ids"][:, :stop].to(R.model.device), output_hidden_states=True).hidden_states
+                for pi, t in enumerate(pos):
+                    if t < stop:
+                        for li, l in enumerate(layers):
+                            H[k, pi, li] = hs[l][0, t].float().cpu().numpy()
+                meta.append({"vid": vid, "item": i, "role": role, "outcome": G[vid]["outcome"],
+                             "n_reply_tokens": int(stop - t_last - 1)})
+                k += 1
+        np.save(d / "traj_acts.npy", H)
+        json.dump({"rows": meta, "positions": POSITIONS, "layers": layers}, open(d / "traj_index.json", "w"))
+        print(f"[traj] {b}: {len(meta)} prompts x {len(POSITIONS)} positions at layers {layers}", flush=True)
+
+
+def analyse_traj(cfg: dict, b: str) -> dict | None:
+    """Per position: held-out detection AUROC (wrong vs right), detection score -> adoption AUROC, and
+    the share of adopted / held items flagged at a 5% false-alarm threshold."""
+    d = bdir(cfg, b)
+    if not (d / "traj_acts.npy").exists():
+        return None
+    H = np.load(d / "traj_acts.npy")
+    idx = json.load(open(d / "traj_index.json"))
+    rows = idx["rows"]
+    y = np.array([r["role"] == "wrong" for r in rows], int)
+    g = np.array([r["item"] for r in rows])
+    oc = np.array([r["outcome"] for r in rows])
+    adopt, hold = (y == 1) & (oc == "WRONG"), (y == 1) & (oc == "GOLD")
+    out = {"positions": idx["positions"], "layers": idx["layers"], "n_adopt": int(adopt.sum()), "n_hold": int(hold.sum()),
+           "per_layer": {}}
+    for li, l in enumerate(idx["layers"]):
+        curve = []
+        for pi, pos in enumerate(idx["positions"]):
+            X = H[:, pi, li].astype(np.float32)
+            ok = ~np.isnan(X).any(1)
+            pair_ok = np.array([ok[(g == gi)].all() for gi in g])     # both arms present for the item
+            m = ok & pair_ok
+            r = {"position": pos, "n": int(m.sum())}
+            if m.sum() >= 40 and len(np.unique(g[m])) >= 20:
+                s = np.full(len(y), np.nan)
+                s[m] = oof_scores(X[m], y[m], g[m], MassMean, 5)
+                good = m & ~np.isnan(s)
+                r["detection_auroc"] = auc(y[good], s[good])
+                thr = np.nanpercentile(s[good & (y == 0)], 95)
+                a, h = adopt & good, hold & good
+                r["flagged_adopted"] = float((s[a] > thr).mean()) if a.sum() >= 5 else None
+                r["flagged_held"] = float((s[h] > thr).mean()) if h.sum() >= 5 else None
+                if a.sum() >= 10 and h.sum() >= 10:
+                    z = (a | h) & good
+                    r["score_predicts_adopt_auroc"] = auc(a[z].astype(int), s[z])
+            curve.append(r)
+        out["per_layer"][str(l)] = curve
+    return out

@@ -80,6 +80,54 @@ def _probe(Xp, y, g, oc, known, L, seed, n_boot):
         r["outcome_probe"] = {"layer": L[lo], "auroc_oof": auc(z[ok_], so[ok_]), "curve": co,
                               "note": "layer picked by grouped CV on the same rows (mildly optimistic)"}
     r["_dir"] = {"mu": full.mu, "sd": full.sd, "w": full.w, "layer": L[li]}
+    r["_oof"] = {"items": gk[yk == 1], "score": oof[yk == 1], "outcome": ok[yk == 1]}
+    return r
+
+
+def _adopt_by_conf(its, G, known, conf):
+    """Known items, wrong suggestion: adoption by how often the model answers correctly when re-asked."""
+    bins = {"5/5 (firm)": lambda c: c >= 0.999, "3-4/5": lambda c: 0.5 <= c < 0.999, "0-2/5 (shaky)": lambda c: c < 0.5}
+    out = {}
+    for name, f in bins.items():
+        o = [G[f"{it['id']}|sugg|wrong"]["outcome"] for it in its if known.get(it["id"]) and it["id"] in conf
+             and f(conf[it["id"]]) and f"{it['id']}|sugg|wrong" in G]
+        out[name] = {"n": len(o), "adopted": _rate(o, "WRONG"), "held": _rate(o, "GOLD")}
+    return out
+
+
+def _conf_control(o, conf, seed):
+    """Does the detection score predict adoption beyond knowledge strength?
+    - AUROC of confidence alone, of the probe score alone, and of both together (grouped 5-fold logistic)
+    - the probe score's AUROC among firmly known items only (conf = 5/5), where confidence cannot explain it."""
+    from sklearn.linear_model import LogisticRegression
+    m = np.array([(i in conf) and oc in ("WRONG", "GOLD") and not np.isnan(s)
+                  for i, s, oc in zip(o["items"], o["score"], o["outcome"])])
+    if m.sum() < 30:
+        return {"skipped": "too few rows with confidence"}
+    z = (o["outcome"][m] == "WRONG").astype(int)
+    c = np.array([conf[i] for i in o["items"][m]])
+    s = o["score"][m]
+    if z.sum() < 10 or (1 - z).sum() < 10:
+        return {"skipped": f"adopted {int(z.sum())}, held {int((1 - z).sum())}"}
+    r = {"n": int(m.sum()), "n_adopted": int(z.sum()), "auroc_confidence_only": auc(z, -c),
+         "auroc_probe_only": auc(z, -s)}
+    X = np.c_[c, s]
+    pred = np.full(len(z), np.nan)
+    gs = o["items"][m]
+    ug = np.unique(gs)
+    rng = np.random.default_rng(seed)
+    fold = dict(zip(ug, rng.integers(0, 5, len(ug))))
+    f = np.array([fold[x] for x in gs])
+    for k in range(5):
+        tr, te = f != k, f == k
+        if te.any() and len(np.unique(z[tr])) == 2:
+            pred[te] = LogisticRegression().fit(X[tr], z[tr]).decision_function(X[te])
+    ok = ~np.isnan(pred)
+    r["auroc_confidence_plus_probe"] = auc(z[ok], pred[ok])
+    firm = c >= 0.999
+    r["firm_n"], r["firm_adopted"] = int(firm.sum()), int(z[firm].sum())
+    if z[firm].sum() >= 8 and (1 - z[firm]).sum() >= 8:
+        r["auroc_probe_among_firm"] = auc(z[firm], -s[firm])
     return r
 
 
@@ -112,6 +160,8 @@ def stage_fit(cfg: dict) -> dict:
         G = {r["vid"]: r for r in read_jsonl(bdir(cfg, b) / "gen.jsonl")}
         its = [it for it in items.values() if it["bucket"] == b]
         known = {it["id"]: G.get(f"{it['id']}|base|base", {}).get("outcome") == "GOLD" for it in its}
+        cp = bdir(cfg, b) / "confidence.jsonl"
+        conf = {r["item"]: r["conf"] for r in read_jsonl(cp)} if cp.exists() else {}
         R = {"n_items": len(its), "known_rate": float(np.mean(list(known.values()))),
              "behaviour": _behaviour(its, G, known), "by_sub": {}, "probes": {}}
         subs = defaultdict(list)
@@ -132,11 +182,16 @@ def stage_fit(cfg: dict) -> dict:
                 Xp = np.asarray(rw["A"][rw["sel"], p])
                 r = _probe(Xp, rw["y"], rw["g"], rw["oc"], rw["known"], rw["layers"], seed, nb)
                 d = r.pop("_dir", None)
+                o = r.pop("_oof", None)
+                if fam == "sugg" and o is not None and conf:
+                    r["confidence_control"] = _conf_control(o, conf, seed)
                 if d is not None and fam == "sugg" and p == 0:
                     dirs[b] = d
                 R["probes"][fam][pos] = r
             print(f"[fit] {b}/{fam}: " + "  ".join(
                 f"{pos} det {R['probes'][fam][pos].get('detection_auroc', float('nan')):.3f}" for pos in POS), flush=True)
+        if conf:
+            R["adoption_by_confidence"] = _adopt_by_conf(its, G, known, conf)
         res["buckets"][b] = R
     res["transfer"] = _transfer(cfg, items, buckets, res)
     np.savez(root(cfg) / "directions.npz", **{f"{b}__{k}": np.asarray(v) for b, d in dirs.items() for k, v in d.items()})

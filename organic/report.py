@@ -46,80 +46,43 @@ def _style(ax):
 
 
 def _traj_fig(cfg, buckets, out):
+    """Per-position probes (see traj.py): detection AUROC and the share of adopted / held items flagged."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    panels, summary = [], {}
+    from .traj import analyse_traj
+    panels = []
     for b in buckets:
-        p = bdir(cfg, b) / "traj.jsonl"
-        if not p.exists():
-            continue
-        rows = read_jsonl(p)
-        groups = {"right suggestion": [r for r in rows if r["role"] == "right"],
-                  "adopted": [r for r in rows if r["role"] == "wrong" and r["outcome"] == "WRONG"],
-                  "held": [r for r in rows if r["role"] == "wrong" and r["outcome"] == "GOLD"]}
-        # z-scored against every read token of the right-suggestion prompts (robust when all prompts end alike)
-        ref = np.concatenate([np.array(r["scores"]) for r in groups["right suggestion"]]) \
-            if groups["right suggestion"] else np.array([0.0, 1.0])
-        mu, sd = float(ref.mean()), float(ref.std() + 1e-6)
-        W, T = 24, cfg["traj"]["max_tokens"]
-        curves, summ = {}, {}
-        for g, rs in groups.items():
-            if len(rs) < 5:
-                continue
-            M = np.full((len(rs), W + T + 1), np.nan)
-            at_info, at_last, reply = [], [], []
-            for k, r in enumerate(rs):
-                s = (np.array(r["scores"]) - mu) / sd
-                last = r["i_last"] - r["i_info"]
-                lo = max(0, last - W)
-                seg = s[lo: last + T + 1]
-                M[k, W - (last - lo): W - (last - lo) + len(seg)] = seg
-                at_info.append(s[0])
-                at_last.append(s[last])
-                if len(s) > last + 1:
-                    reply.append(s[last + 1: last + 33].mean())
-            curves[g] = (np.nanmean(M, 0), np.nanstd(M, 0) / np.sqrt(np.maximum(1, np.sum(~np.isnan(M), 0))), len(rs))
-            summ[g] = {"n": len(rs), "at_info_end": float(np.mean(at_info)), "at_last_prompt": float(np.mean(at_last)),
-                       "reply_first_32": float(np.mean(reply)) if reply else None}
-        if curves:
-            panels.append((b, curves, W, T))
-            summary[b] = summ
+        t = analyse_traj(cfg, b)
+        if t:
+            lk = str(t["layers"][0])
+            panels.append((b, t, t["per_layer"][lk], lk))
     if not panels:
         return None, {}
     nc = min(3, len(panels))
     nr = int(np.ceil(len(panels) / nc))
-    fig, axes = plt.subplots(nr, nc, figsize=(4.2 * nc, 2.9 * nr), squeeze=False)
+    fig, axes = plt.subplots(nr, nc, figsize=(4.4 * nc, 3.0 * nr), squeeze=False)
     for ax in axes.flat[len(panels):]:
         ax.axis("off")
-    for ax, (b, curves, W, T) in zip(axes.flat, panels):
-        x = np.arange(-W, T + 1)
-        ends = []
-        for g, (m, se, n) in curves.items():
-            ax.plot(x, m, color=COL[g], lw=2, label=f"{g} (n={n})")
-            ax.fill_between(x, m - se, m + se, color=COL[g], alpha=0.15, lw=0)
-            j = np.where(~np.isnan(m))[0]
-            if len(j):
-                ends.append([m[j[-1]], x[j[-1]], g])
-        lo, hi = ax.get_ylim()
-        gap = 0.08 * (hi - lo)
-        ends.sort()
-        for k in range(1, len(ends)):                 # nudge end labels apart
-            ends[k][0] = max(ends[k][0], ends[k - 1][0] + gap)
-        for yv, xv, g in ends:
-            ax.annotate(g.split()[0], (xv, yv), xytext=(4, 0), textcoords="offset points",
-                        fontsize=7, color=INK, va="center", annotation_clip=False)
-        ax.axvline(0, color=MUTED, lw=0.8, ls=":")
-        ax.set_title(b, fontsize=9, color=INK, loc="left")
-        ax.set_xlabel("tokens from the end of the prompt (0 = last prompt token, >0 = reply)", fontsize=7, color=MUTED)
-        ax.set_ylabel("detection score (z)", fontsize=7, color=MUTED)
+    series = [("detection AUROC", "detection_auroc", "#2a78d6"), ("flagged: adopted", "flagged_adopted", "#eb6834"),
+              ("flagged: held", "flagged_held", "#1baf7a")]
+    for ax, (b, t, curve, lk) in zip(axes.flat, panels):
+        x = np.arange(len(curve))
+        for name, key, col in series:
+            yv = np.array([c.get(key) if c.get(key) is not None else np.nan for c in curve], float)
+            ax.plot(x, yv, color=col, lw=2, marker="o", ms=4, label=name)
+        ax.axvline(2, color=MUTED, lw=0.8, ls=":")
+        ax.set_ylim(0, 1.02)
+        ax.set_xticks(x, [c["position"].replace("_token", "").replace("suggestion_end", "sugg end")
+                          .replace("last_prompt", "last prompt").replace("prompt_mid", "mid") for c in curve],
+                      rotation=45, ha="right", fontsize=7)
+        ax.set_title(f"{b}  (layer {lk}; adopted {t['n_adopt']}, held {t['n_hold']})", fontsize=9, color=INK, loc="left")
         _style(ax)
-    h, l = axes.flat[0].get_legend_handles_labels()
-    fig.legend([x for x in h], [s.split(" (")[0] for s in l], loc="lower center", ncol=3, frameon=False, fontsize=8)
-    fig.tight_layout(rect=(0, 0.06, 1, 1))
+    fig.legend(*axes.flat[0].get_legend_handles_labels(), loc="lower center", ncol=3, frameon=False, fontsize=8)
+    fig.tight_layout(rect=(0, 0.07, 1, 1))
     fig.savefig(out, dpi=160)
     plt.close(fig)
-    return out.name, summary
+    return out.name, {b: (t, curve) for b, t, curve, _ in panels}
 
 
 def _transfer_fig(tr, out):
@@ -181,7 +144,7 @@ def write_report(cfg: dict) -> Path:
     extra = []
     for b in bs:
         be = B[b]["behaviour"]
-        for fam in ("doc", "work_full", "work_trunc"):
+        for fam in ("doc", "work_full", "work_check", "work_trunc"):
             w, r = _arm(be, f"{fam}/wrong"), _arm(be, f"{fam}/right")
             if w or r:
                 extra.append(f"| {b} | {fam} | {_pct(w.get('wrong'))} | {_pct(w.get('gold'))} | {_pct(w.get('other'))} | "
@@ -201,6 +164,33 @@ def write_report(cfg: dict) -> Path:
     if subs:
         L += ["", "### By sub-bucket", "", "| Bucket | Sub | Items | Known | Adopted (known) |", "|---|---|---|---|---|"]
         L += [f"| {b} | {s} | {v['n']} | {_pct(v['known_rate'])} | {_pct(v['adopt_rate_known'])} |" for b, s, v in subs]
+
+    # ---------------------------------------------------------------- knowledge strength
+    cb = [b for b in bs if B[b].get("adoption_by_confidence")]
+    if cb:
+        L += ["", "## Is adoption just weak knowledge?", "",
+              "Each known item's bare question re-asked 5 times at temperature 0.7; confidence = share answered correctly. "
+              "Adoption of the wrong suggestion by confidence:", "",
+              "| Bucket | 5/5 (firm): n, adopted | 3–4/5: n, adopted | 0–2/5 (shaky): n, adopted |", "|---|---|---|---|"]
+        for b in cb:
+            a = B[b]["adoption_by_confidence"]
+            L.append("| " + b + " | " + " | ".join(f"{a[k]['n']}, {_pct(a[k]['adopted'])}" for k in a) + " |")
+        L += ["", "Does the detection probe predict adoption **beyond** confidence? (suggestion family; AUROC for adopting)", "",
+              "| Bucket | Read at | n (adopted) | Confidence only | Probe only | Both | Probe, firm items only (n adopted) |",
+              "|---|---|---|---|---|---|---|"]
+        for b in cb:
+            for pos, r in B[b]["probes"].get("sugg", {}).items():
+                c = r.get("confidence_control")
+                if not c:
+                    continue
+                if "skipped" in c:
+                    L.append(f"| {b} | {pos} | {c['skipped']} | | | | |")
+                    continue
+                L.append(f"| {b} | {pos.replace('_', ' ')} | {c['n']} ({c['n_adopted']}) | {_f(c['auroc_confidence_only'], 3)} | "
+                         f"{_f(c['auroc_probe_only'], 3)} | {_f(c['auroc_confidence_plus_probe'], 3)} | "
+                         f"{_f(c.get('auroc_probe_among_firm'), 3)} ({c['firm_adopted']}/{c['firm_n']}) |")
+        L += ["", "*If the probe adds nothing over confidence, and is near 0.5 among firm items, it is reading knowledge "
+              "strength, not a sycophancy-specific signal.*"]
 
     # ---------------------------------------------------------------- probes
     L += ["", "## Does the model register the wrong information?", "",
@@ -240,17 +230,19 @@ def write_report(cfg: dict) -> Path:
     # ---------------------------------------------------------------- trajectories
     fn, summ = _traj_fig(cfg, bs, out / "fig_trajectory.png")
     if fn:
-        L += ["", "## From the suggestion to the answer", "",
-              "The bucket's detection direction projected on every token from where the suggestion ends, through the "
-              "rest of the prompt and the first reply tokens. z-scored against right-suggestion prompts at the "
-              "suggestion end. A flag that is there at the suggestion and gone by the reply, only for adopted items, "
-              "is the flag-then-fade pattern.", "", f"![trajectory]({fn})", "",
-              "| Bucket | Group | n | At suggestion end | At last prompt token | Reply, first 32 tokens |",
-              "|---|---|---|---|---|---|"]
-        for b, s in summ.items():
-            for g, v in s.items():
-                L.append(f"| {b} | {g} | {v['n']} | {_f(v['at_info_end'])} | {_f(v['at_last_prompt'])} | "
-                         f"{_f(v['reply_first_32'])} |")
+        L += ["", "## From the suggestion to the answer (a separate probe at each position)", "",
+              "Known items, both suggestion arms. At each position a new wrong-vs-right probe is fitted (grouped "
+              "5-fold, out-of-fold scores). **Flagged** = share of wrong-suggestion prompts above the 5%-false-alarm "
+              "threshold at that position, split by what the model then did. If adopted items start flagged and lose it "
+              "before the reply while held items keep it, that is flag-then-fade; if adopted items are never flagged, the "
+              "error was never registered. From reply token 1 on the two arms' replies differ, so the probe can also read "
+              "what the model is writing.", "", f"![trajectory]({fn})", "",
+              "| Bucket | Position | n | Detection AUROC | Flagged: adopted / held | Score → adopt |", "|---|---|---|---|---|---|"]
+        for b, (t, curve) in summ.items():
+            for c in curve:
+                L.append(f"| {b} | {c['position']} | {c['n']} | {_f(c.get('detection_auroc'), 3)} | "
+                         f"{_pct(c.get('flagged_adopted'))} / {_pct(c.get('flagged_held'))} | "
+                         f"{_f(c.get('score_predicts_adopt_auroc'), 3)} |")
     L += ["", "## Notes", "",
           "- Outcome-probe layers are picked by grouped CV on the same rows (mildly optimistic); detection AUROCs are on held-out items.",
           "- Correlational only: nothing here shows the signal causes the behaviour.",

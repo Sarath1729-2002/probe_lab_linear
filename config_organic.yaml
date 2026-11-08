@@ -23,6 +23,10 @@ gen:
   gpu_mem: 0.85
   max_tokens: {default: 512, processbench: 1024, cruxeval: 768}
 
+confidence:                               # knowledge strength: bare question re-asked n times
+  n_samples: 5
+  temperature: 0.7
+
 extract:
   dtype: bfloat16
   batch: 8
@@ -32,5 +36,4 @@ probes:
   n_boot: 300
 
 traj:
-  n_items: 200                            # known items per bucket (adopted ones first), both suggestion arms
-  max_tokens: 96                          # reply tokens read
+  n_items: 300                            # known items per bucket (adopted and held balanced), both suggestion arms

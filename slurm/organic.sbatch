@@ -4,7 +4,7 @@
 #SBATCH --gpus-per-node=h100:4          # buckets split over the 4 GPUs; one Qwen copy per GPU
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=0
-#SBATCH --time=08:00:00
+#SBATCH --time=06:00:00
 #SBATCH --output=logs/%x-%j.out
 
 # Wrong information in the prompt, observed only. Needs the login-node step first:
@@ -22,7 +22,7 @@ set -u
 export PYTHONPATH="${SLURM_SUBMIT_DIR}:${PYTHONPATH:-}"
 
 CFG=config_organic.yaml
-STAGES="${STAGES:-gen extract fit traj report}"
+STAGES="${STAGES:-regrade gen confidence extract fit traj report}"
 NGPU=$(nvidia-smi -L 2>/dev/null | wc -l); [ "$NGPU" -lt 1 ] && NGPU=1
 DD=$(python -c "import os,yaml; print(os.path.expandvars(yaml.safe_load(open('$CFG'))['data_dir']))")
 [ -f "$DD/variants.jsonl" ] || { echo "no $DD/variants.jsonl: run 'python -m organic.cli download build' on the login node"; exit 1; }
@@ -41,7 +41,10 @@ gpu_stages() {   # $1 gpu, $2 "bucket list", rest: stages
   done
 }
 
-i=0; for b in "${SHARDS[@]}"; do [ -n "$b" ] && gpu_stages $i "$b" gen extract & i=$((i+1)); done; wait
+if has regrade; then          # CPU: re-grade stored replies with the current grader (keeps outcome_v0)
+  python -m organic.cli regrade --config $CFG --set ${SETS:-} 2>&1 | tee "logs/org-${SLURM_JOB_ID}-regrade.log"
+fi
+i=0; for b in "${SHARDS[@]}"; do [ -n "$b" ] && gpu_stages $i "$b" gen confidence extract & i=$((i+1)); done; wait
 if has fit; then
   echo "== $(date '+%H:%M:%S') fit"
   python -m organic.cli fit --config $CFG --set ${SETS:-} > "logs/org-${SLURM_JOB_ID}-fit.log" 2>&1 \
