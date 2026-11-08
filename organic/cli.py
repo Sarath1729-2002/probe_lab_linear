@@ -5,6 +5,10 @@ Login node (CPU):       variants   (new prompt families on the SAME items.jsonl)
 GPU:                    gen   confidence   extract   traj        (--buckets limits them; default all)
 CPU:                    fit   report
 Helper:                 shard --n 4                  (prints one bucket list per GPU)
+
+v3 (config_organic_v3.yaml, one model per --model tag; outputs under <run_prefix>/<tag>):
+  login:  variants                       GPU:  gen confidence extract traj steer       CPU: fit report
+  once, after all models:  compare
 """
 from __future__ import annotations
 
@@ -16,7 +20,8 @@ import yaml
 
 from .common import load_config, read_jsonl
 
-STAGES = ["download", "build", "variants", "regrade", "gen", "confidence", "extract", "fit", "traj", "report", "shard"]
+STAGES = ["download", "build", "variants", "regrade", "gen", "confidence", "extract", "fit", "traj", "steer",
+          "report", "compare", "shard"]
 
 
 def main():
@@ -26,8 +31,15 @@ def main():
     ap.add_argument("--buckets", nargs="*", default=None)
     ap.add_argument("--n", type=int, default=4)
     ap.add_argument("--set", nargs="*", default=[])
+    ap.add_argument("--model", default=None, help="v3: model tag from the config's models list")
     a = ap.parse_args()
     cfg = load_config(a.config, {k: yaml.safe_load(v) for k, v in (s.split("=", 1) for s in a.set)})
+    prefix = cfg["run_prefix"]
+    if a.model:
+        m = next((m for m in cfg.get("models", []) if m["tag"] == a.model), None)
+        if m is None:
+            raise SystemExit(f"unknown --model {a.model}; config has {[m['tag'] for m in cfg.get('models', [])]}")
+        cfg["model"], cfg["run_prefix"] = m["name"], f"{prefix}/{a.model}"
     dd = Path(os.path.expandvars(cfg["data_dir"]))
     all_b = [b for b, n in cfg["buckets"].items() if n]
     bks = a.buckets or all_b
@@ -44,7 +56,9 @@ def main():
             build(cfg, dd, Path(os.path.expandvars(cfg["report_dir"])) / cfg["run_prefix"] / "SAMPLES.md")
         elif s == "variants":
             from .build import rebuild_variants
-            rebuild_variants(dd, Path(os.path.expandvars(cfg["report_dir"])) / cfg["run_prefix"] / "SAMPLES.md", cfg["seed"])
+            rebuild_variants(dd, Path(os.path.expandvars(cfg["report_dir"])) / prefix / "SAMPLES.md", cfg["seed"],
+                             cfg.get("families"), Path(os.path.expandvars(cfg["items_from"])) if cfg.get("items_from") else None,
+                             all_b)
         elif s == "regrade":
             from .run import stage_regrade
             stage_regrade(cfg, bks)
@@ -63,9 +77,19 @@ def main():
         elif s == "traj":
             from .traj import stage_traj
             stage_traj(cfg, bks)
+        elif s == "steer":
+            from .steer import stage_steer
+            stage_steer(cfg)
         elif s == "report":
-            from .report import write_report
-            write_report(cfg)
+            if cfg.get("version") == 3:
+                from .report_v3 import write_report_v3
+                write_report_v3(cfg)
+            else:
+                from .report import write_report
+                write_report(cfg)
+        elif s == "compare":
+            from .report_v3 import write_compare
+            write_compare(dict(cfg, run_prefix=prefix), [m["tag"] for m in cfg.get("models", [])])
         elif s == "shard":                       # balance buckets over GPUs by (prompts x max tokens)
             V = read_jsonl(dd / "variants.jsonl")
             mt = cfg["gen"]["max_tokens"]

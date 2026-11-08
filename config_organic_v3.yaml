@@ -1,0 +1,55 @@
+# organic_v3: the same real wrong solutions (ProcessBench) framed 4 sources x 3 asks, three models,
+# probes, per-position probes, and a steering test. See organic/frames.py and organic/steer.py.
+#   login node (once):  python -m organic.cli variants --config config_organic_v3.yaml
+#   compute:            sbatch slurm/organic_v3.sbatch
+version: 3
+run_prefix: organic_v3
+out_dir: ${SCRATCH}/organic_runs
+data_dir: ${SCRATCH}/organic_v3_data
+items_from: ${SCRATCH}/organic_data/items.jsonl      # the frozen v1/v2 items: identical problems and solutions
+report_dir: reports
+seed: 0
+
+models:
+  - {tag: qwen7b,    name: Qwen/Qwen2.5-7B-Instruct}
+  - {tag: llama8b,   name: meta-llama/Llama-3.1-8B-Instruct}
+  - {tag: mistral7b, name: mistralai/Mistral-7B-Instruct-v0.3}
+model: Qwen/Qwen2.5-7B-Instruct                     # default when --model is not given
+
+buckets: {processbench: 1}                           # only ProcessBench items are copied
+families: [base, sugg,
+           frame_user_plain, frame_user_check, frame_user_critic,
+           frame_student_plain, frame_student_check, frame_student_critic,
+           frame_model_plain, frame_model_check, frame_model_critic,
+           frame_self_plain, frame_self_check, frame_self_critic]
+
+gen:
+  backend: vllm
+  max_model_len: 6144
+  gpu_mem: 0.85
+  max_tokens: {default: 1024}
+
+confidence:
+  n_samples: 5
+  temperature: 0.7
+
+extract:
+  dtype: bfloat16
+  batch: 8
+
+probes:
+  layer_step: 2
+  n_boot: 300
+
+traj:
+  family: frame_user_check
+  n_items: 300
+
+steer:
+  family: frame_user_check
+  alphas: [0, 0.5, 1, 2, -1]                         # along mean(recover) - mean(follow); 0 = unsteered baseline
+  random_alphas: [2]                                 # random direction, same norm
+  n_wrong: 120                                       # held-out known items with a wrong solution
+  n_right: 50                                        # held-out known items with a correct solution (side effects)
+  batch: 16
+  max_tokens: 768

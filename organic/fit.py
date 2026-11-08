@@ -16,7 +16,7 @@ from .common import read_jsonl
 
 from .common import MassMean, auc, best_layer, boot_ci, group_split, logistic, oof_scores
 
-from .run import PROBE_FAMILIES, bdir, load, root
+from .run import bdir, is_probe_family, load, root
 
 POS = ["info_end", "last_prompt_token"]
 
@@ -84,13 +84,13 @@ def _probe(Xp, y, g, oc, known, L, seed, n_boot):
     return r
 
 
-def _adopt_by_conf(its, G, known, conf):
-    """Known items, wrong suggestion: adoption by how often the model answers correctly when re-asked."""
+def _adopt_by_conf(its, G, known, conf, fam="sugg"):
+    """Known items, wrong version: adoption by how often the model answers correctly when re-asked."""
     bins = {"5/5 (firm)": lambda c: c >= 0.999, "3-4/5": lambda c: 0.5 <= c < 0.999, "0-2/5 (shaky)": lambda c: c < 0.5}
     out = {}
     for name, f in bins.items():
-        o = [G[f"{it['id']}|sugg|wrong"]["outcome"] for it in its if known.get(it["id"]) and it["id"] in conf
-             and f(conf[it["id"]]) and f"{it['id']}|sugg|wrong" in G]
+        o = [G[f"{it['id']}|{fam}|wrong"]["outcome"] for it in its if known.get(it["id"]) and it["id"] in conf
+             and f(conf[it["id"]]) and f"{it['id']}|{fam}|wrong" in G]
         out[name] = {"n": len(o), "adopted": _rate(o, "WRONG"), "held": _rate(o, "GOLD")}
     return out
 
@@ -129,6 +129,80 @@ def _conf_control(o, conf, seed):
     if z[firm].sum() >= 8 and (1 - z[firm]).sum() >= 8:
         r["auroc_probe_among_firm"] = auc(z[firm], -s[firm])
     return r
+
+
+def _families(cfg, b) -> list[str]:
+    """Probe families with stored activations in this bucket (sugg, doc, work_*, frame_*...)."""
+    p = bdir(cfg, b) / "acts_index.json"
+    if not p.exists():
+        return []
+    fams = {v.split("|")[1] for v in json.load(open(p))["vids"]}
+    return sorted(f for f in fams if is_probe_family(f))
+
+
+def _frame_metrics(its, G, known, conf, frames):
+    """Behaviour per frame on known items: follow / recover / other on wrong solutions, explicit certification,
+    firm-knowledge follow rate; for critic frames, ProcessBench-style first-error accuracy and F1."""
+    from .frames import certifies, critic_correct, critic_step
+    out = {}
+    for f in frames:
+        W = [(it, G[f"{it['id']}|{f}|wrong"]) for it in its if known.get(it["id"]) and f"{it['id']}|{f}|wrong" in G]
+        Rr = [(it, G[f"{it['id']}|{f}|right"]) for it in its if known.get(it["id"]) and f"{it['id']}|{f}|right" in G]
+        W = [(it, g) for it, g in W if g["outcome"] != "SKIP"]
+        Rr = [(it, g) for it, g in Rr if g["outcome"] != "SKIP"]
+        oc = [g["outcome"] for _, g in W]
+        fol = [g for _, g in W if g["outcome"] == "WRONG"]
+        firm = [g["outcome"] for it, g in W if conf.get(it["id"], 0) >= 0.999]
+        r = {"n_wrong": len(W), "n_right": len(Rr), "follow": _rate(oc, "WRONG"), "recover": _rate(oc, "GOLD"),
+             "other": _rate(oc, "OTHER"), "follow_firm": _rate(firm, "WRONG"), "n_firm": len(firm),
+             "certify_when_following": float(np.mean([certifies(g["text"]) for g in fol])) if fol else None,
+             "correct_on_right": _rate([g["outcome"] for _, g in Rr], "GOLD"),
+             "certify_on_right": float(np.mean([certifies(g["text"]) for _, g in Rr])) if Rr else None}
+        if f.endswith("_critic"):
+            cw = [critic_correct(it, g["text"]) for it, g in W]
+            cr = [critic_correct(it, g["text"]) for it, g in Rr]
+            kw = [critic_step(g["text"]) for _, g in W]
+            a = float(np.mean([x is True for x in cw])) if cw else None
+            bb = float(np.mean([x is True for x in cr])) if cr else None
+            found = [(k is not None and k > 0, g["outcome"]) for k, (_, g) in zip(kw, W)]
+            fe = [o for x, o in found if x]
+            r.update({"critic_acc_wrong": a, "critic_acc_right": bb,
+                      "critic_f1": (2 * a * bb / (a + bb)) if a and bb else None,
+                      "critic_says_none_on_wrong": float(np.mean([k == 0 for k in kw])) if kw else None,
+                      "critic_unparsed_wrong": float(np.mean([k is None for k in kw])) if kw else None,
+                      "flags_an_error_on_wrong": float(np.mean([x for x, _ in found])) if found else None,
+                      "follow_despite_flagging_error": _rate(fe, "WRONG"), "n_flagged": len(fe)})
+        out[f] = r
+    return out
+
+
+def _frame_transfer(cfg, b, items, G, known, R):
+    """Follow-vs-recover probe (wrong solutions, last prompt token) trained in one frame, tested in another,
+    at the training frame's outcome layer. Is 'about to inherit the error' one direction across framings?"""
+    fams = [f for f in R["probes"] if f.startswith("frame_")
+            and (R["probes"][f].get("last_prompt_token", {}).get("outcome_probe") or {}).get("layer") is not None]
+    data = {}
+    for f in fams:
+        rw = _rows(b, cfg, f, items, G, known)
+        m = rw["known"] & (rw["y"] == 1) & np.isin(rw["oc"], ["WRONG", "GOLD"])
+        data[f] = {"A": rw["A"], "sel": rw["sel"][m], "z": (rw["oc"][m] == "WRONG").astype(int),
+                   "layers": rw["layers"], "layer": R["probes"][f]["last_prompt_token"]["outcome_probe"]["layer"]}
+    if len(data) < 2:
+        return {"skipped": "fewer than two frames with an outcome probe"}
+    M = []
+    for a in fams:
+        li = data[a]["layers"].index(data[a]["layer"])
+        mm = MassMean().fit(np.asarray(data[a]["A"][data[a]["sel"], 1, li], np.float32), data[a]["z"])
+        row = []
+        for t in fams:
+            if t == a:
+                row.append(R["probes"][a]["last_prompt_token"]["outcome_probe"]["auroc_oof"])
+                continue
+            zt = data[t]["z"]
+            row.append(auc(zt, mm.decision_function(np.asarray(data[t]["A"][data[t]["sel"], 1, li], np.float32)))
+                       if 0 < zt.sum() < len(zt) else None)
+        M.append(row)
+    return {"frames": fams, "matrix_train_row_test_col": M}
 
 
 def _rows(b, cfg, fam, items, G, known):
@@ -173,7 +247,8 @@ def stage_fit(cfg: dict) -> dict:
             R["by_sub"][s] = {"n": len(si), "known_rate": len(kk) / max(1, len(si)),
                               "adopt_rate_known": _rate(wr, "WRONG"), "hold_rate_known": _rate(wr, "GOLD"),
                               "n_known_wrong_arm": len(wr)}
-        for fam in PROBE_FAMILIES:
+        tf = cfg.get("traj", {}).get("family", "sugg")
+        for fam in _families(cfg, b):
             rw = _rows(b, cfg, fam, items, G, known)
             if rw is None:
                 continue
@@ -183,15 +258,20 @@ def stage_fit(cfg: dict) -> dict:
                 r = _probe(Xp, rw["y"], rw["g"], rw["oc"], rw["known"], rw["layers"], seed, nb)
                 d = r.pop("_dir", None)
                 o = r.pop("_oof", None)
-                if fam == "sugg" and o is not None and conf:
+                if o is not None and conf:
                     r["confidence_control"] = _conf_control(o, conf, seed)
-                if d is not None and fam == "sugg" and p == 0:
+                if d is not None and fam == tf and p == 0:
                     dirs[b] = d
                 R["probes"][fam][pos] = r
             print(f"[fit] {b}/{fam}: " + "  ".join(
                 f"{pos} det {R['probes'][fam][pos].get('detection_auroc', float('nan')):.3f}" for pos in POS), flush=True)
         if conf:
             R["adoption_by_confidence"] = _adopt_by_conf(its, G, known, conf)
+            R["follow_by_confidence"] = {f: _adopt_by_conf(its, G, known, conf, f) for f in _families(cfg, b)}
+        if any(f.startswith("frame_") for f in _families(cfg, b)):
+            from .frames import FRAMES
+            R["frames"] = _frame_metrics(its, G, known, conf, [f for f in FRAMES if f in _families(cfg, b)])
+            R["frame_transfer"] = _frame_transfer(cfg, b, items, G, known, R)
         res["buckets"][b] = R
     res["transfer"] = _transfer(cfg, items, buckets, res)
     np.savez(root(cfg) / "directions.npz", **{f"{b}__{k}": np.asarray(v) for b, d in dirs.items() for k, v in d.items()})

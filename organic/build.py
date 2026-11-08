@@ -183,7 +183,7 @@ def build_items(cfg: dict, dd: Path) -> list[dict]:
 
 # ---------------------------------------------------------------------------- variants
 
-def variants(it: dict) -> list[dict]:
+def variants(it: dict, families: list[str] | None = None) -> list[dict]:
     fmt = FMT_MC if it["type"] == "mc" else FMT
     Q = it["question"]
     out = []
@@ -209,6 +209,10 @@ def variants(it: dict) -> list[dict]:
             "\n\nPlease check my working carefully before giving the final answer.")
         add("work_trunc", it["role"], Q + "\n\nHere is my working so far:\n\n" +
             "\n\n".join(s.strip() for s in st[:it["trunc_k"]]), "\n\nPlease continue from where my working stops.")
+    if families:                                     # v3: the framing grid on ProcessBench items
+        from .frames import frame_variants
+        out += frame_variants(it)
+        out = [v for v in out if v["family"] in families]
     for v in out:                                    # the planted information ends at info_end in every family
         if v["family"] == "doc":
             v["info_end"] = len("Here is a document:\n\n" + (it["doc_wrong"] if v["role"] == "wrong" else it["doc_right"]).strip())
@@ -247,18 +251,31 @@ def write_samples(items, V, path: Path, seed: int, k: int = 5):
         for it in rng.sample(byb[b], min(k, len(byb[b]))):
             L += [f"### {it['id']}  ·  {it['sub']}  ·  gold `{it['gold_text']}`  ·  wrong `{it.get('wrong_text')}`", ""]
             for v in vby[it["id"]]:
-                u = v["user"][: v["info_end"]] + " ▲" + v["user"][v["info_end"]:]
+                if "messages" in v:
+                    m = v["messages"]
+                    u = (f"[user]\n{m[0]['content']}\n\n[assistant]\n{m[1]['content']} ▲\n\n[user]\n{m[2]['content']}")
+                else:
+                    u = v["user"][: v["info_end"]] + " ▲" + v["user"][v["info_end"]:]
                 L += [f"**{v['family']} / {v['role']}**", "", "~~~~text", u, "~~~~", ""]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(L))
     print(f"[build] samples -> {path}")
 
 
-def rebuild_variants(dd: Path, samples_path: Path | None = None, seed: int = 0) -> list[dict]:
-    """New prompt families on the SAME frozen items: rewrites variants.jsonl from items.jsonl only."""
+def rebuild_variants(dd: Path, samples_path: Path | None = None, seed: int = 0, families: list[str] | None = None,
+                     items_from: Path | None = None, buckets: list[str] | None = None) -> list[dict]:
+    """New prompt families on the SAME frozen items: rewrites variants.jsonl from items.jsonl only.
+    v3: items.jsonl is first copied from another run's frozen set (items_from), keeping `buckets`."""
+    dd.mkdir(parents=True, exist_ok=True)
+    if not (dd / "items.jsonl").exists():
+        if not items_from or not Path(items_from).exists():
+            raise SystemExit(f"no {dd / 'items.jsonl'} and no items_from to copy it from")
+        src = [it for it in read_jsonl(items_from) if not buckets or it["bucket"] in buckets]
+        write_jsonl(dd / "items.jsonl", src)
+        print(f"[variants] copied {len(src)} frozen items from {items_from}")
     items = read_jsonl(dd / "items.jsonl")
     old = {v["vid"]: v for v in read_jsonl(dd / "variants.jsonl")} if (dd / "variants.jsonl").exists() else {}
-    V = [v for it in items for v in variants(it)]
+    V = [v for it in items for v in variants(it, families)]
     changed = [v["vid"] for v in V if v["vid"] in old and old[v["vid"]]["user"] != v["user"]]
     if changed:
         raise SystemExit(f"{len(changed)} existing prompts would change (e.g. {changed[0]}); refusing")

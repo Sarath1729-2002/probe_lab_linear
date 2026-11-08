@@ -12,10 +12,14 @@ from pathlib import Path
 
 import numpy as np
 
-from .common import Reader, chat, layer_list, make_generator, read_jsonl, write_jsonl
+from .common import Reader, chat, layer_list, make_generator, read_jsonl, render, write_jsonl
 from .grade import grade
 
-PROBE_FAMILIES = ("sugg", "doc", "work_full", "work_check", "work_trunc")
+NON_PROBE = ("base", "doubt")          # every other family has wrong / right versions and is probed
+
+
+def is_probe_family(f: str) -> bool:
+    return f not in NON_PROBE
 
 
 def root(cfg) -> Path:
@@ -69,7 +73,7 @@ def stage_gen(cfg: dict, buckets: list[str]) -> None:
             gen = make_generator(cfg, cfg["model"])
         tok = gen.tokenizer
         mt = cfg["gen"]["max_tokens"].get(b, cfg["gen"]["max_tokens"]["default"])
-        prompts = [chat(tok, v["user"]) for v in vb]
+        prompts = [render(tok, v)[0] for v in vb]
         lim = cfg["gen"]["max_model_len"] - mt
         ok = [len(tok(p, add_special_tokens=False)["input_ids"]) <= lim for p in prompts]
         idx = [i for i, o in enumerate(ok) if o]
@@ -149,7 +153,7 @@ def stage_extract(cfg: dict, buckets: list[str]) -> None:
         G = {r["vid"]: r for r in read_jsonl(d / "gen.jsonl")}
         old_v = json.load(open(d / "acts_index.json"))["vids"] if (d / "acts.npy").exists() else []
         have = set(old_v)
-        vb = [v for v in V if v["bucket"] == b and v["family"] in PROBE_FAMILIES and v["vid"] in G
+        vb = [v for v in V if v["bucket"] == b and is_probe_family(v["family"]) and v["vid"] in G
               and G[v["vid"]]["outcome"] != "SKIP" and v["vid"] not in have]
         if not vb:
             print(f"[extract] {b}: nothing new ({len(old_v)} prompts on disk)")
@@ -159,10 +163,9 @@ def stage_extract(cfg: dict, buckets: list[str]) -> None:
             L = layer_list(R.n_layers, cfg["probes"]["layer_step"])
         texts, ce = [], []
         for v in vb:
-            p = chat(R.tok, v["user"])
-            off = p.rfind(v["user"])
+            p, info = render(R.tok, v)
             texts.append(p)
-            ce.append([off + v["info_end"], len(p)])
+            ce.append([info, len(p)])
         order = np.argsort([len(t) for t in texts])          # length-sorted batches, restored below
         H, _ = R.read([texts[i] for i in order], L, [ce[i] for i in order], add_special=False,
                       bs=cfg["extract"]["batch"])
