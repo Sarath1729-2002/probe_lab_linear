@@ -139,8 +139,8 @@ def write_report_v3(cfg: dict) -> Path:
     if sp.exists():
         S = json.load(open(sp))
         L += ["", "## Causal test: steering toward 'recover'", "",
-              f"Direction = mean(recover) − mean(follow) at the last prompt token, layer {S['layer']}, fitted on half the "
-              f"items ({S['n_fit_recover']} recover / {S['n_fit_follow']} follow), tested on the other half "
+              f"Direction = mean({S.get('contrast', 'recover - follow').split(' - ')[0]}) − mean(follow) at the last prompt token, "
+              f"layer {S['layer']}, fitted on half the items ({S['n_fit_recover']} vs {S['n_fit_follow']} follow), tested on the other half "
               f"({S['n_test_wrong']} wrong, {S['n_test_right']} correct solutions), frame `{S['family']}`. Added at every "
               f"position; alpha = 1 is the full mean difference (norm {S['norm']:.1f}; typical state norm "
               f"{S['mean_state_norm']:.0f}). Random = a random direction of the same norm.", "",

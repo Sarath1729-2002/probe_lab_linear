@@ -20,8 +20,8 @@ import yaml
 
 from .common import load_config, read_jsonl
 
-STAGES = ["download", "build", "variants", "regrade", "gen", "confidence", "extract", "fit", "traj", "steer",
-          "report", "compare", "shard"]
+STAGES = ["download", "build", "variants", "regrade", "gen", "confidence", "extract", "score", "fit", "deference",
+          "traj", "steer", "report", "compare", "shard"]
 
 
 def main():
@@ -58,7 +58,7 @@ def main():
             from .build import rebuild_variants
             rebuild_variants(dd, Path(os.path.expandvars(cfg["report_dir"])) / prefix / "SAMPLES.md", cfg["seed"],
                              cfg.get("families"), Path(os.path.expandvars(cfg["items_from"])) if cfg.get("items_from") else None,
-                             all_b)
+                             cfg["buckets"] if cfg.get("version") in (4, 5) else all_b)
         elif s == "regrade":
             from .run import stage_regrade
             stage_regrade(cfg, bks)
@@ -77,19 +77,44 @@ def main():
         elif s == "traj":
             from .traj import stage_traj
             stage_traj(cfg, bks)
+        elif s == "score":
+            from .score import stage_score
+            stage_score(cfg, bks)
+        elif s == "deference":
+            from .deference import stage_deference
+            stage_deference(cfg)
         elif s == "steer":
-            from .steer import stage_steer
-            stage_steer(cfg)
+            if cfg.get("version") == 5:
+                raise SystemExit("v5 is observation-only: there is no steering stage")
+            if cfg.get("version") == 4:
+                from .steer import stage_steer_multi
+                stage_steer_multi(cfg)
+            else:
+                from .steer import stage_steer
+                stage_steer(cfg)
         elif s == "report":
-            if cfg.get("version") == 3:
+            if cfg.get("version") == 5:
+                from .report_v5 import write_report_v5
+                write_report_v5(cfg)
+            elif cfg.get("version") == 4:
+                from .report_v4 import write_report_v4
+                write_report_v4(cfg)
+            elif cfg.get("version") == 3:
                 from .report_v3 import write_report_v3
                 write_report_v3(cfg)
             else:
                 from .report import write_report
                 write_report(cfg)
         elif s == "compare":
-            from .report_v3 import write_compare
-            write_compare(dict(cfg, run_prefix=prefix), [m["tag"] for m in cfg.get("models", [])])
+            if cfg.get("version") == 5:
+                from .report_v5 import write_compare_v5
+                write_compare_v5(dict(cfg, run_prefix=prefix), [m["tag"] for m in cfg.get("models", [])])
+            elif cfg.get("version") == 4:
+                from .report_v4 import write_compare_v4
+                write_compare_v4(dict(cfg, run_prefix=prefix), [m["tag"] for m in cfg.get("models", [])])
+            else:
+                from .report_v3 import write_compare
+                write_compare(dict(cfg, run_prefix=prefix), [m["tag"] for m in cfg.get("models", [])])
         elif s == "shard":                       # balance buckets over GPUs by (prompts x max tokens)
             V = read_jsonl(dd / "variants.jsonl")
             mt = cfg["gen"]["max_tokens"]

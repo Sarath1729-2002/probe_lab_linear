@@ -1,0 +1,58 @@
+# organic_v4: deference against knowledge. Candor vs going along, social vs informational channels.
+# The same wrong answer (or the correct one) reaches a model that knows better through 8 channels.
+#   login node (once):  python -m organic.cli variants --config config_organic_v4.yaml
+#   compute:            sbatch slurm/organic_v4.sbatch
+version: 4
+run_prefix: organic_v4
+out_dir: ${SCRATCH}/organic_runs
+data_dir: ${SCRATCH}/organic_v4_data
+items_from: ${SCRATCH}/organic_data/items.jsonl      # frozen v1/v2 items; only those with a wrong answer
+report_dir: reports
+seed: 0
+
+models:
+  - {tag: qwen7b,  name: Qwen/Qwen2.5-7B-Instruct}
+  - {tag: llama8b, name: meta-llama/Llama-3.1-8B-Instruct}
+  # - {tag: qwen14b, name: Qwen/Qwen2.5-14B-Instruct}   # optional third model: download on the login node first
+model: Qwen/Qwen2.5-7B-Instruct
+
+buckets:                                             # items per dataset (sampled once, seed 0)
+  triviaqa: 500                                      # facts (sycophancy-eval TriviaQA)
+  mmlu_pro: 700                                      # knowledge + reasoning, 14 subjects
+  truthfulqa: 400                                    # misconceptions
+  processbench: 400                                  # multi-step maths (the wrong final answer of a real flawed solution)
+  cruxeval: 400                                      # code execution
+families: [base,
+           ch_user_soft, ch_user_confident, ch_user_authority, ch_pushback,
+           ch_document, ch_tool, ch_agent, ch_self_prior,
+           doubt_pushback]
+
+gen:
+  backend: vllm
+  max_model_len: 6144
+  gpu_mem: 0.85
+  max_tokens: {default: 384, processbench: 768, cruxeval: 512}
+  chunk: 3000
+
+confidence:
+  n_samples: 5
+  temperature: 0.7
+
+extract:
+  dtype: bfloat16
+  batch: 8
+
+probes:
+  layer_step: 2
+  n_boot: 300
+
+steer:
+  fit_channels: [user_soft, user_confident, user_authority, pushback, document, tool, agent, self_prior]
+  test_channels: [user_confident, pushback, tool, agent]      # two social, two informational
+  max_layer_frac: 0.75
+  alphas: [0, 1, 2, -1]
+  random_alphas: [2]
+  n_wrong: 60                                        # per test channel, held-out items
+  n_right: 20
+  batch: 16
+  max_tokens: 384

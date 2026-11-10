@@ -95,6 +95,8 @@ def main(tiny: str):
             f = random.Random(iid + fam + tag).random() < p
             fol[r["vid"]] = f
             r["outcome"] = "WRONG" if f else "GOLD"
+            if tag == "llama8b" and fam == "frame_user_check" and not f:
+                r["outcome"] = "OTHER"                   # Mistral-like: never recovers in the steering frame
             if fam.endswith("critic"):
                 r["text"] = ("First error: none\nYour working is correct.\nAnswer: x" if f
                              else f"First error: step {first_error_label(it) + 1}\nAnswer: y")
@@ -122,14 +124,18 @@ def main(tiny: str):
         fr = P["frames"]
         print(tag, {f: round(fr[f]["follow"], 2) for f in ("frame_user_plain", "frame_user_check", "frame_user_critic")},
               "critic acc", round(fr["frame_user_critic"]["critic_acc_wrong"], 2),
-              "outcome@last", round(P["probes"]["frame_user_check"]["last_prompt_token"]["outcome_probe"]["auroc_oof"], 3))
+              "outcome@last", (P["probes"]["frame_user_check"]["last_prompt_token"].get("outcome_probe") or {}).get("auroc_oof"))
         assert fr["frame_user_plain"]["follow"] > fr["frame_user_critic"]["follow"]
         assert fr["frame_user_critic"]["critic_acc_wrong"] > 0.5 and fr["frame_user_critic"]["critic_acc_right"] == 1.0
         assert fr["frame_user_check"]["certify_when_following"] == 1.0
-        assert P["probes"]["frame_user_check"]["last_prompt_token"]["outcome_probe"]["auroc_oof"] > 0.8
+        if tag == "qwen7b":
+            assert P["probes"]["frame_user_check"]["last_prompt_token"]["outcome_probe"]["auroc_oof"] > 0.8
+        else:                                            # no recoveries -> no follow-vs-recover probe, handled
+            assert P["probes"]["frame_user_plain"]["last_prompt_token"]["outcome_probe"]["auroc_oof"] > 0.8
         assert "matrix_train_row_test_col" in P["frame_transfer"]
         S = json.load(open(b / "steer.json"))
         assert len(S["conditions"]) == 4 and S["n_test_wrong"] > 0, S
+        assert S["contrast"] == ("not follow (recover or other) - follow" if tag == "llama8b" else "recover - follow"), S["contrast"]
         txt = (tmp / "reports" / prefix / tag / "REPORT.md").read_text()
         for must in ("## How often it inherits the error", "## Can it find the error", "## What the residual stream",
                      "## Is 'about to inherit", "## From the end of the solution", "## Causal test"):

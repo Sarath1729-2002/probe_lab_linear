@@ -19,7 +19,7 @@ NON_PROBE = ("base", "doubt")          # every other family has wrong / right ve
 
 
 def is_probe_family(f: str) -> bool:
-    return f not in NON_PROBE
+    return f not in NON_PROBE and not f.startswith("doubt") and not f.endswith("_doubt")
 
 
 def root(cfg) -> Path:
@@ -77,16 +77,22 @@ def stage_gen(cfg: dict, buckets: list[str]) -> None:
         lim = cfg["gen"]["max_model_len"] - mt
         ok = [len(tok(p, add_special_tokens=False)["input_ids"]) <= lim for p in prompts]
         idx = [i for i, o in enumerate(ok) if o]
-        texts = [None] * len(vb)
-        if idx:
-            res = gen.generate([prompts[i] for i in idx], 1, 0.0, mt, cfg["seed"])
-            for i, r in zip(idx, res):
-                texts[i] = r[0]
-        rows = []
-        for v, t, o in zip(vb, texts, ok):
-            oc, a = grade(items[v["item"]], t) if o else ("SKIP", None)
-            rows.append({"vid": v["vid"], "text": t, "answer": a, "outcome": oc})
-        write_jsonl(out, old + rows)
+        # generate and save in chunks, so a job that hits its time limit keeps what it finished
+        chunk = cfg["gen"].get("chunk", 2000)
+        rows, done = [], old
+        for c0 in range(0, len(vb), chunk):
+            sl = range(c0, min(len(vb), c0 + chunk))
+            idx = [i for i in sl if ok[i]]
+            texts = {}
+            if idx:
+                for i, r in zip(idx, gen.generate([prompts[i] for i in idx], 1, 0.0, mt, cfg["seed"])):
+                    texts[i] = r[0]
+            for i in sl:
+                oc, a = grade(items[vb[i]["item"]], texts[i]) if ok[i] else ("SKIP", None)
+                rows.append({"vid": vb[i]["vid"], "text": texts.get(i), "answer": a, "outcome": oc})
+            done = old + rows
+            write_jsonl(out, done)
+            print(f"[gen] {b}: {len(rows)}/{len(vb)} saved", flush=True)
         print(f"[gen] {b}: {len(rows)} new prompts {dict(Counter(r['outcome'] for r in rows))}", flush=True)
 
 

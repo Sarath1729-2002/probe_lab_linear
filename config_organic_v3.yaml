@@ -47,6 +47,7 @@ traj:
 
 steer:
   family: frame_user_check
+  max_layer_frac: 0.75                               # steer no deeper than 3/4 of the layers
   alphas: [0, 0.5, 1, 2, -1]                         # along mean(recover) - mean(follow); 0 = unsteered baseline
   random_alphas: [2]                                 # random direction, same norm
   n_wrong: 120                                       # held-out known items with a wrong solution

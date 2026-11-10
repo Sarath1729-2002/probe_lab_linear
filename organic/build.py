@@ -209,9 +209,14 @@ def variants(it: dict, families: list[str] | None = None) -> list[dict]:
             "\n\nPlease check my working carefully before giving the final answer.")
         add("work_trunc", it["role"], Q + "\n\nHere is my working so far:\n\n" +
             "\n\n".join(s.strip() for s in st[:it["trunc_k"]]), "\n\nPlease continue from where my working stops.")
-    if families:                                     # v3: the framing grid on ProcessBench items
+    if families:                                     # v3 framing grid / v4 channels
+        from .channels import channel_variants
         from .frames import frame_variants
-        out += frame_variants(it)
+        out += frame_variants(it) if any(f.startswith("frame_") for f in families) else []
+        out += channel_variants(it, families)
+        if any(f.startswith("p_") for f in families):  # v5: published protocols
+            from .protocols import protocol_variants
+            out += protocol_variants(it, families)
         out = [v for v in out if v["family"] in families]
     for v in out:                                    # the planted information ends at info_end in every family
         if v["family"] == "doc":
@@ -271,6 +276,14 @@ def rebuild_variants(dd: Path, samples_path: Path | None = None, seed: int = 0, 
         if not items_from or not Path(items_from).exists():
             raise SystemExit(f"no {dd / 'items.jsonl'} and no items_from to copy it from")
         src = [it for it in read_jsonl(items_from) if not buckets or it["bucket"] in buckets]
+        if isinstance(buckets, dict):                # v4: {bucket: n} caps; only items that have a wrong answer
+            rng = random.Random(seed)
+            keep = []
+            for b, n in buckets.items():
+                pool = [it for it in src if it["bucket"] == b and it.get("wrong_text") is not None]
+                rng.shuffle(pool)
+                keep += pool[:n] if n and n > 1 else pool
+            src = keep
         write_jsonl(dd / "items.jsonl", src)
         print(f"[variants] copied {len(src)} frozen items from {items_from}")
     items = read_jsonl(dd / "items.jsonl")

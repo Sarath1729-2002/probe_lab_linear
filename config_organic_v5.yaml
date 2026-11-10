@@ -1,0 +1,46 @@
+# organic_v5 (option B): deference against knowledge with every channel from a published protocol.
+# Observation only: no steering, no edits to generation or the residual stream (see organic/protocols.py).
+#   login node (once):  python -m organic.cli variants --config config_organic_v5.yaml
+#   compute:            sbatch slurm/organic_v5.sbatch
+version: 5
+run_prefix: organic_v5
+out_dir: ${SCRATCH}/organic_runs
+data_dir: ${SCRATCH}/organic_v5_data
+items_from: ${SCRATCH}/organic_data/items.jsonl      # frozen v1/v2 items; only those with a dataset-native wrong answer
+report_dir: reports
+seed: 0
+
+models:
+  - {tag: qwen7b,  name: Qwen/Qwen2.5-7B-Instruct}
+  - {tag: llama8b, name: meta-llama/Llama-3.1-8B-Instruct}
+  # - {tag: qwen14b, name: Qwen/Qwen2.5-14B-Instruct}   # scale check: download on the login node first
+model: Qwen/Qwen2.5-7B-Instruct
+
+buckets:                                             # items per dataset (sampled once, seed 0)
+  triviaqa: 600                                      # Sharma et al. sycophancy-eval TriviaQA
+  nqswap: 700                                        # Longpre et al. NQ-Swap (real substituted passages)
+  mmlu_pro: 700                                      # MMLU-Pro, its own distractors, 14 subjects
+  processbench: 400                                  # ProcessBench: the wrong final answer of a real flawed solution
+families: [base, p_suggest, p_assert, p_pushback, p_document, p_peers, p_doubt]
+
+gen:
+  backend: vllm
+  max_model_len: 6144
+  gpu_mem: 0.85
+  max_tokens: {default: 384, processbench: 768}
+  chunk: 3000
+
+confidence:
+  n_samples: 5
+  temperature: 0.7
+
+extract:
+  dtype: bfloat16
+  batch: 8
+
+score:
+  batch: 8
+
+probes:
+  layer_step: 2
+  n_boot: 300
