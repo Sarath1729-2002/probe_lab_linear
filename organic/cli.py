@@ -20,7 +20,7 @@ import yaml
 
 from .common import load_config, read_jsonl
 
-STAGES = ["download", "build", "variants", "regrade", "gen", "confidence", "extract", "score", "fit", "deference",
+STAGES = ["download", "build", "variants", "regrade", "gen", "gen2", "confidence", "extract", "score", "fit", "deference",
           "traj", "steer", "report", "compare", "shard"]
 
 
@@ -46,6 +46,18 @@ def main():
     for s in a.stage:
         if s != "shard":
             print(f"===== {s} =====", flush=True)
+        if s in ("download", "build", "variants") and cfg.get("version") == 6:
+            # v6: one login-node step. Reuse raw files from earlier runs, download what is missing, freeze items + prompts.
+            from .design6 import build6
+            from .sources import download_all, seed_raw
+            seed_raw(dd / "raw", Path(os.path.expandvars(cfg["raw_from"])) if cfg.get("raw_from") else None)
+            if s != "variants":
+                st = download_all(dd / "raw", all_b)
+                bad = [k for k, v in st.items() if v.startswith("FAILED")]
+                print("sources:", st, ("\nFAILED: " + ", ".join(bad)) if bad else "")
+            if s != "download":
+                build6(cfg, dd, Path(os.path.expandvars(cfg["report_dir"])) / prefix / "SAMPLES.md")
+            continue
         if s == "download":
             from .sources import download_all
             st = download_all(dd / "raw", bks if a.buckets else None)
@@ -62,6 +74,9 @@ def main():
         elif s == "regrade":
             from .run import stage_regrade
             stage_regrade(cfg, bks)
+        elif s == "gen2":
+            from .run import stage_gen2
+            stage_gen2(cfg, bks)
         elif s == "confidence":
             from .run import stage_confidence
             stage_confidence(cfg, bks)
@@ -84,8 +99,8 @@ def main():
             from .deference import stage_deference
             stage_deference(cfg)
         elif s == "steer":
-            if cfg.get("version") == 5:
-                raise SystemExit("v5 is observation-only: there is no steering stage")
+            if cfg.get("version") in (5, 6):
+                raise SystemExit("v5/v6 are observation-only: there is no steering stage")
             if cfg.get("version") == 4:
                 from .steer import stage_steer_multi
                 stage_steer_multi(cfg)
@@ -93,7 +108,10 @@ def main():
                 from .steer import stage_steer
                 stage_steer(cfg)
         elif s == "report":
-            if cfg.get("version") == 5:
+            if cfg.get("version") == 6:
+                from .report_v6 import write_report_v6
+                write_report_v6(cfg)
+            elif cfg.get("version") == 5:
                 from .report_v5 import write_report_v5
                 write_report_v5(cfg)
             elif cfg.get("version") == 4:
@@ -106,7 +124,10 @@ def main():
                 from .report import write_report
                 write_report(cfg)
         elif s == "compare":
-            if cfg.get("version") == 5:
+            if cfg.get("version") == 6:
+                from .report_v6 import write_compare_v6
+                write_compare_v6(dict(cfg, run_prefix=prefix), [m["tag"] for m in cfg.get("models", [])])
+            elif cfg.get("version") == 5:
                 from .report_v5 import write_compare_v5
                 write_compare_v5(dict(cfg, run_prefix=prefix), [m["tag"] for m in cfg.get("models", [])])
             elif cfg.get("version") == 4:

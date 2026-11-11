@@ -116,7 +116,7 @@ def main(tiny: str):
         B, P, G, An = R["behaviour"], R["probes"], R["regression"], R["anchors"]
         rs = G["per_channel"]["suggest"]
         print(tag, "L1-L2", round(B["social_minus_info"]["mean"], 3), B["social_minus_info"]["ci"],
-              "| suggest R2", round(rs["r2"], 3), "prior-only", round(rs["prior_only_r2"], 3), "beyond", round(rs["partial_r2_beyond_prior"], 3),
+              "| suggest posterior R2", round(rs["r2"], 3), "prior-only", round(rs["prior_only_r2"], 3), "beyond", round(rs["partial_r2_beyond_prior"], 3),
               "shuffled", round(rs["control_shuffled_r2"], 3), "| binary shuffled",
               round(P["per_channel"]["suggest"]["last_prompt_token"]["control_shuffled_auroc"], 3),
               "| anchors", {k: v for k, v in An.items() if k != "published_reference"})
@@ -126,7 +126,7 @@ def main(tiny: str):
         assert {"sharma_triviaqa", "longpre_nqswap", "benchform_conformity", "flipflop"} <= set(An)
         assert "block_means" in G["transfer"] and "block_means" in P["transfer"]
         txt = (tmp / "reports" / prefix / tag / "REPORT.md").read_text()
-        for must in ("## 1. Does our setup reproduce", "## 2. How often it defers", "## 3. How far the content pulls",
+        for must in ("## 1. Does our setup reproduce", "## 2. How often it defers", "## 3. How far the content moves",
                      "## 4. Can deference be read", "## 5. One signal"):
             assert must in txt, must
     cmp = write_compare_v5(dict(cfg, run_prefix=prefix), tags).read_text()

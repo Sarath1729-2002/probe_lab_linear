@@ -21,17 +21,24 @@ from collections import defaultdict
 import numpy as np
 
 from . import channels as _v4
+from .common import MassMean, auc, best_layer, oof_scores, read_jsonl
+from .run import bdir, load, root
 
 
 def scheme(cfg) -> dict:
-    """Channel set: v4 (organic.channels) or v5 (organic.protocols, published protocols)."""
-    if cfg.get("version") == 5:
+    """Channel set. fam: channel -> prompt family; order: every content channel; social / info: the two levels used
+    for the user-vs-source contrast; doubt_fam: the content-free challenge family."""
+    v = cfg.get("version")
+    if v == 6:
+        from .design6 import SCHEME
+        return dict(SCHEME)
+    if v == 5:
         from . import protocols as P
-        return {"prefix": P.PREFIX, "social": P.SOCIAL, "info": P.INFO, "doubt_fam": P.DOUBT, "doubt_key": "doubt"}
-    return {"prefix": "ch_", "social": _v4.SOCIAL, "info": _v4.INFO, "doubt_fam": "doubt_pushback",
-            "doubt_key": "doubt_pushback"}
-from .common import MassMean, auc, best_layer, oof_scores, read_jsonl
-from .run import bdir, load, root
+        pre, soc, inf, df, dk = P.PREFIX, P.SOCIAL, P.INFO, P.DOUBT, "doubt"
+    else:
+        pre, soc, inf, df, dk = "ch_", _v4.SOCIAL, _v4.INFO, "doubt_pushback", "doubt_pushback"
+    return {"prefix": pre, "social": soc, "info": inf, "doubt_fam": df, "doubt_key": dk,
+            "order": soc + inf, "fam": {c: pre + c for c in soc + inf}}
 
 
 def _boot_ci(vals_by_item: dict, n=1000, seed=0):
@@ -67,9 +74,9 @@ def behaviour(items, D, seed, sch):
     SOCIAL, INFO = sch["social"], sch["info"]
     out = {"by_channel": {}, "by_bucket": {}}
     per_item = defaultdict(dict)                     # item -> channel -> 1/0 deferred (wrong role)
-    for c in SOCIAL + INFO + [sch["doubt_key"]]:
+    for c in sch["order"] + [sch["doubt_key"]]:
         isd = c == sch["doubt_key"]
-        fam = sch["doubt_fam"] if isd else sch["prefix"] + c
+        fam = sch["doubt_fam"] if isd else sch["fam"][c]
         rows_w, rows_r, firm = [], [], []
         byb = defaultdict(list)
         for b, d in D.items():
@@ -137,12 +144,12 @@ def _order(D, R):                                    # _X concatenates bucket by
 
 def probes(items, D, cfg, sch):
     seed = cfg["seed"]
-    CHANNELS = sch["social"] + sch["info"]
+    CHANNELS = sch["order"]
     layers = next(d["acts"]["layers"] for d in D.values() if d["acts"])
     res = {"per_channel": {}, "layers": layers}
     store = {}
     for c in CHANNELS:
-        fam = sch["prefix"] + c
+        fam = sch["fam"][c]
         R = _order(D, _rows(D, fam, ["wrong"]))
         R = [r for r in R if r[4] in ("WRONG", "GOLD")]
         z = np.array([r[4] == "WRONG" for r in R], int)
@@ -158,7 +165,7 @@ def probes(items, D, cfg, sch):
                 li, curve = best_layer(X, z, g, MassMean, 3)
                 s = oof_scores(X[:, li], z, g, MassMean, 5)
                 ok = ~np.isnan(s)
-                q.update({"outcome_layer": layers[li], "outcome_auroc": auc(z[ok], s[ok])})
+                q.update({"outcome_layer": layers[li], "outcome_auroc": auc(z[ok], s[ok]), "outcome_curve_cv": curve})
                 # control task (Hewitt & Liang 2019): the same probe on shuffled labels should sit at 0.5
                 zs = np.random.default_rng(seed).permutation(z)
                 ss = oof_scores(X[:, li], zs, g, MassMean, 5)
@@ -190,7 +197,7 @@ def probes(items, D, cfg, sch):
 
 def _transfer(D, store, layers, seed, sch):
     SOCIAL, INFO = sch["social"], sch["info"]
-    cs = [c for c in SOCIAL + INFO if c in store]
+    cs = [c for c in sch["order"] if c in store]
     if len(cs) < 2:
         return {"skipped": "fewer than two channels with enough defer/hold items"}
     li = int(np.median([store[c]["li"] for c in cs]))
@@ -237,6 +244,13 @@ def stage_deference(cfg: dict) -> dict:
         from .regress import anchors, regression
         out["regression"] = regression(cfg, items, D, sch)
         out["anchors"] = anchors(items, D, sch)
+    if cfg.get("version") == 6:
+        from .analysis6 import anchors6, contrasts6, coverage6
+        from .regress import regression
+        out["regression"] = regression(cfg, items, D, sch)
+        out["contrasts"] = contrasts6(items, D, sch, cfg["seed"])
+        out["anchors"] = anchors6(items, D, sch)
+        out["coverage"] = coverage6(items, D)
     json.dump(out, open(root(cfg) / "deference.json", "w"), indent=1, default=float)
     print(f"[deference] wrote {root(cfg) / 'deference.json'}")
     return out

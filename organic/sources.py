@@ -150,7 +150,77 @@ def cruxeval(out: Path):
     return len(rows)
 
 
-SOURCES = {"triviaqa": triviaqa, "nqswap": nqswap, "truthfulqa": truthfulqa, "mmlu_pro": mmlu_pro,
+def mmlu(out: Path):
+    """MMLU (Hendrycks et al. 2021), test split, all 57 subjects."""
+    from datasets import load_dataset
+    ds = load_dataset("cais/mmlu", "all", split="test")
+    rows = [{"question": r["question"], "options": list(r["choices"]), "gold_index": int(r["answer"]),
+             "category": r["subject"]} for r in ds]
+    write_jsonl(out, rows)
+    return len(rows)
+
+
+BBH_TASKS = ["causal_judgement", "date_understanding", "disambiguation_qa", "geometric_shapes", "hyperbaton",
+             "logical_deduction_three_objects", "logical_deduction_five_objects", "movie_recommendation",
+             "penguins_in_a_table", "reasoning_about_colored_objects", "ruin_names", "salient_translation_error_detection",
+             "snarks", "temporal_sequences", "tracking_shuffled_objects_three_objects", "navigate", "sports_understanding",
+             "web_of_lies", "formal_fallacies", "boolean_expressions"]
+
+
+def bbh(out: Path):
+    """BIG-Bench Hard (Suzgun et al. 2023), the benchmark used by Turpin et al. and BenchForm."""
+    from datasets import load_dataset
+    rows = []
+    for t in BBH_TASKS:
+        ds = None
+        for name, split, kw in (("lukaemon/bbh", "test", {}), ("maveriq/bigbenchhard", "train", {"trust_remote_code": True}),
+                                ("Joschka/big_bench_hard", "train", {})):
+            try:
+                ds = load_dataset(name, t, split=split, **kw)
+                break
+            except Exception:
+                continue
+        if ds is None:
+            print(f"  bbh/{t}: not loadable")
+            continue
+        for r in ds:
+            rows.append({"task": t, "input": str(r["input"]), "target": str(r["target"]).strip()})
+    write_jsonl(out, rows)
+    return len(rows)
+
+
+def clasheval(out: Path):
+    """ClashEval (Wu, Wu & Zou, NeurIPS 2024 D&B). Column names are detected; the loader refuses to guess."""
+    from datasets import load_dataset
+    dd = load_dataset("kewu93/ClashEval")
+    ds = dd[list(dd.keys())[0]]
+    cols = ds.column_names
+    print(f"  clasheval columns: {cols}")
+    pick = lambda *names: next((c for c in names if c in cols), None)
+    q = pick("question", "query")
+    co, cm = pick("context_original", "original_context", "context_orig"), pick("context_mod", "modified_context", "context_modified")
+    ao, am = pick("answer_original", "original_answer", "answer_orig"), pick("answer_mod", "modified_answer", "answer_modified")
+    if not all((q, co, cm, ao, am)):
+        raise RuntimeError(f"unexpected ClashEval columns {cols}")
+    dom, deg = pick("dataset", "domain", "category"), pick("mod_degree", "mod_type", "degree")
+    rows = [{"question": str(r[q]), "org_context": str(r[co]), "sub_context": str(r[cm]), "org_answer": [str(r[ao])],
+             "sub_answer": [str(r[am])], "domain": str(r[dom]) if dom else "", "degree": str(r[deg]) if deg else ""}
+            for r in ds if str(r[ao]).strip() != str(r[am]).strip()]
+    write_jsonl(out, rows)
+    return len(rows)
+
+
+def seed_raw(raw: Path, raw_from: Path | None) -> None:
+    """Reuse raw files already downloaded for an earlier run (identical sources)."""
+    raw.mkdir(parents=True, exist_ok=True)
+    if raw_from and Path(raw_from).exists():
+        for f in Path(raw_from).glob("*.jsonl"):
+            if not (raw / f.name).exists():
+                (raw / f.name).write_bytes(f.read_bytes())
+                print(f"[sources] {f.stem}: reused from {raw_from}")
+
+
+SOURCES = {"mmlu": mmlu, "bbh": bbh, "clasheval": clasheval, "triviaqa": triviaqa, "nqswap": nqswap, "truthfulqa": truthfulqa, "mmlu_pro": mmlu_pro,
            "processbench": processbench, "cute": cute, "cruxeval": cruxeval}
 
 

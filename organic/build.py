@@ -120,6 +120,51 @@ def build_items(cfg: dict, dd: Path) -> list[dict]:
                 rows.append({"q": r["question"], "opts": [r["options"][i] for i in keep],
                              "gi": keep.index(r["gold_index"]), "cat": c})
         items += _mc_items(rows, "mmlu_pro", lambda r: r["cat"], rng, "mmlu")
+    # ---- MMLU (Hendrycks et al. 2021): its own distractors, n per subject group
+    if n.get("mmlu"):
+        by = defaultdict(list)
+        for r in _raw(dd, "mmlu"):
+            by[r["category"]].append(r)
+        per = max(1, round(n["mmlu"] / max(1, len(by))))
+        rows = []
+        for c in sorted(by):
+            for r in _cap(by[c], per, rng):
+                rows.append({"q": r["question"], "opts": list(r["options"]), "gi": r["gold_index"], "cat": c})
+        items += _mc_items(_cap(rows, n["mmlu"], rng), "mmlu", lambda r: r["cat"], rng, "mmlu")
+    # ---- BIG-Bench Hard (Suzgun et al. 2023): multiple-choice tasks, wrong = another listed option
+    if n.get("bbh"):
+        import re as _re
+        by = defaultdict(list)
+        for r in _raw(dd, "bbh"):
+            by[r["task"]].append(r)
+        per = max(1, round(n["bbh"] / max(1, len(by))))
+        k = 0
+        for t in sorted(by):
+            for r in _cap(by[t], per, rng):
+                opts = _re.findall(r"^\(([A-J])\)\s*(.+?)\s*$", r["input"], flags=_re.M)
+                m = _re.fullmatch(r"\(([A-J])\)", r["target"])
+                if m and len(opts) >= 2 and m.group(1) in dict(opts):
+                    od = dict(opts)
+                    g = m.group(1)
+                    w = rng.choice([l for l in od if l != g])
+                    items.append({"id": f"bbh-{k}", "bucket": "bbh", "sub": t, "type": "mc", "n_options": len(od),
+                                  "question": r["input"].strip(), "gold": g, "gold_text": f"({g}) {od[g]}",
+                                  "wrong": w, "wrong_text": f"({w}) {od[w]}"})
+                    k += 1
+                elif r["target"] in ("Yes", "No", "yes", "no", "True", "False", "valid", "invalid"):
+                    pair = {"Yes": "No", "No": "Yes", "yes": "no", "no": "yes", "True": "False", "False": "True",
+                            "valid": "invalid", "invalid": "valid"}
+                    items.append({"id": f"bbh-{k}", "bucket": "bbh", "sub": t, "type": "exact", "question": r["input"].strip(),
+                                  "gold": r["target"], "gold_text": r["target"], "wrong": pair[r["target"]],
+                                  "wrong_text": pair[r["target"]]})
+                    k += 1
+    # ---- ClashEval (Wu et al. 2024): its own modified documents and answers
+    if n.get("clasheval"):
+        for k, r in enumerate(_cap(_raw(dd, "clasheval"), n["clasheval"], rng)):
+            items.append({"id": f"clash-{k}", "bucket": "clasheval", "sub": r.get("domain") or "clasheval", "type": "text",
+                          "question": r["question"].strip(), "gold": r["org_answer"], "gold_text": r["org_answer"][0],
+                          "wrong": r["sub_answer"], "wrong_text": r["sub_answer"][0],
+                          "doc_wrong": r["sub_context"], "doc_right": r["org_context"], "degree": r.get("degree", "")})
     # ---- multi-step maths with real errors: ProcessBench (human-labelled first error step)
     if n.get("processbench"):
         pb = _raw(dd, "processbench")

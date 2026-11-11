@@ -113,21 +113,24 @@ def write_report_v5(cfg: dict) -> Path:
 
     # ---------------------------------------------------------------- continuous
     if "per_channel" in G:
-        L += ["", "## 3. How far the content pulls it (continuous, read-only)", "",
-              "**Shift** = log-odds of the correct over the planted answer on the bare question, minus the same with the wrong "
-              "content in context (teacher-forced, no generation). Positive = pulled toward the wrong answer. "
-              "**Regression probe**: ridge from the last prompt token, grouped out-of-fold. **Beyond prior** = R² of the probe "
-              "on what knowledge strength alone leaves unexplained. **Shuffled** = control task (should be ≤ 0).", "",
-              "| Channel | n | Median shift | Shift → defers (AUROC) | Prior → defers (AUROC) | Probe R² (layer) | Spearman | Prior-only R² | Beyond prior R² | Shuffled R² |",
-              "|---|---|---|---|---|---|---|---|---|---|"]
+        L += ["", "## 3. How far the content moves it (continuous, read-only)", "",
+              "**Posterior margin** = log-odds of the correct over the planted answer *with the wrong content in context*, "
+              "teacher-forced, no generation (below 0 = it now prefers the planted answer). **Prior** = the same on the bare "
+              "question. **Regression probe**: ridge from the last prompt token to the posterior margin, grouped out-of-fold. "
+              "**Beyond prior** = R² on what prior strength alone leaves unexplained. **Shuffled** = control task (≤ 0).", "",
+              "| Channel | n | Posterior < 0 | Posterior → defers | Prior → defers | Probe → defers | Probe R² (layer) | Spearman | Prior-only R² | Beyond prior R² | Shuffled R² |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
         for c in CH:
             r = G["per_channel"].get(c) or {}
             if "r2" not in r:
-                L.append(f"| {c} | {r.get('skipped', '–')} | | | | | | | | |")
+                L.append(f"| {c} | {r.get('skipped', '–')} | | | | | | | | | |")
                 continue
-            L.append(f"| {c} | {r['n']} | {_f(r['median_shift'])} | {_f(r['shift_predicts_defer_auroc'], 3)} | "
-                     f"{_f(r['prior_predicts_defer_auroc'], 3)} | **{_f(r['r2'], 3)}** ({r['layer']}) | {_f(r['spearman'], 3)} | "
-                     f"{_f(r['prior_only_r2'], 3)} | {_f(r['partial_r2_beyond_prior'], 3)} | {_f(r['control_shuffled_r2'], 3)} |")
+            L.append(f"| {c} | {r['n']} | {_pct(r.get('posterior_below_zero'))} | {_f(r.get('posterior_predicts_defer_auroc'), 3)} | "
+                     f"{_f(r.get('prior_predicts_defer_auroc'), 3)} | {_f(r.get('probe_predicts_defer_auroc'), 3)} | **{_f(r['r2'], 3)}** "
+                     f"({r['layer']}) | {_f(r['spearman'], 3)} | {_f(r['prior_only_r2'], 3)} | {_f(r['partial_r2_beyond_prior'], 3)} | "
+                     f"{_f(r['control_shuffled_r2'], 3)} |")
+        L += ["", "*Shift (prior − posterior) is kept as a secondary target in `deference.json`: it correlates with prior strength "
+              "(" + ", ".join(f"{c} {_f((G['per_channel'].get(c) or {}).get('corr_prior_shift'))}" for c in CH) + "), so it is not used for claims.*"]
 
     # ---------------------------------------------------------------- binary probes
     L += ["", "## 4. Can deference be read before the reply? (defer vs hold)", "",
@@ -182,10 +185,11 @@ def write_compare_v5(cfg: dict, tags: list[str]) -> Path:
                     ("BenchForm conformity, wrong guidance", ("anchors", "benchform_conformity", "conformity_rate_wrong_guidance")),
                     ("FlipFlop flip rate", ("anchors", "flipflop", "flip_rate_known"))):
         L.append(f"| {lab} | " + " | ".join(_f(_dig(R[t], ks)) for t in ts) + " |")
-    L += ["", "## Regression probe on the shift (R²; beyond prior)", ""] + hdr
+    L += ["", "## Regression probe on the posterior margin (R²; beyond prior; probe → defers AUROC)", ""] + hdr
     for c in CH:
         L.append(f"| {c} | " + " | ".join(f"{_f(_dig(R[t], ('regression', 'per_channel', c, 'r2')), 3)}; "
-                                          f"{_f(_dig(R[t], ('regression', 'per_channel', c, 'partial_r2_beyond_prior')), 3)}" for t in ts) + " |")
+                                          f"{_f(_dig(R[t], ('regression', 'per_channel', c, 'partial_r2_beyond_prior')), 3)}; "
+                                          f"{_f(_dig(R[t], ('regression', 'per_channel', c, 'probe_predicts_defer_auroc')), 3)}" for t in ts) + " |")
     L += ["", "## Transfer user ↔ source (AUROC; Spearman)", ""] + hdr
     for k in ("social->social", "info->info", "social->info", "info->social"):
         L.append(f"| {k} | " + " | ".join(f"{_f(_dig(R[t], ('probes', 'transfer', 'block_means', k)), 3)}; "

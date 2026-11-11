@@ -1,0 +1,48 @@
+# organic_v6: deference against knowledge on established benchmarks. Observation only (see organic/design6.py).
+#   login node (once):  HF_HUB_OFFLINE=0 HF_DATASETS_OFFLINE=0 python -m organic.cli build --config config_organic_v6.yaml
+#   compute:            sbatch slurm/organic_v6.sbatch
+version: 6
+run_prefix: organic_v6
+out_dir: ${SCRATCH}/organic_runs
+data_dir: ${SCRATCH}/organic_v6_data
+raw_from: ${SCRATCH}/organic_data/raw                # raw files already downloaded for v1 are reused, not re-fetched
+report_dir: reports
+seed: 0
+
+models:
+  - {tag: qwen7b,  name: Qwen/Qwen2.5-7B-Instruct}
+  - {tag: llama8b, name: meta-llama/Llama-3.1-8B-Instruct}
+  - {tag: qwen14b, name: Qwen/Qwen2.5-14B-Instruct}  # scale check; run separately: MODELS="qwen14b" sbatch ...
+model: Qwen/Qwen2.5-7B-Instruct
+
+buckets:                                             # items per benchmark (sampled once, seed 0)
+  triviaqa: 400                                      # TriviaQA via sycophancy-eval (Sharma et al.), their wrong answers
+  nqswap: 400                                        # Natural Questions / NQ-Swap (Longpre et al.), substituted entities + passages
+  mmlu: 500                                          # MMLU (Hendrycks et al.), its distractors, spread over 57 subjects
+  truthfulqa: 300                                    # TruthfulQA MC1 (Lin et al.), its misconception options
+  bbh: 450                                           # BIG-Bench Hard (Suzgun et al.), another listed option
+  processbench: 300                                  # GSM8K / MATH via ProcessBench: a real flawed solution's final answer
+  clasheval: 300                                     # ClashEval (Wu et al.), its modified documents (skipped if unavailable)
+families: [base, m_none, m_user, m_expert, m_document, m_tool, m_peer, s_user_hedged, s_peers6, s_passage, b_sharma]
+
+gen:
+  backend: vllm
+  max_model_len: 6144
+  gpu_mem: 0.85
+  max_tokens: {default: 384, processbench: 768, bbh: 512}
+  chunk: 3000
+
+confidence:
+  n_samples: 5
+  temperature: 0.7
+
+extract:
+  dtype: bfloat16
+  batch: 8
+
+score:
+  batch: 8
+
+probes:
+  layer_step: 2
+  n_boot: 300

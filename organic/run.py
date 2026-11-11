@@ -19,7 +19,7 @@ NON_PROBE = ("base", "doubt")          # every other family has wrong / right ve
 
 
 def is_probe_family(f: str) -> bool:
-    return f not in NON_PROBE and not f.startswith("doubt") and not f.endswith("_doubt")
+    return f not in NON_PROBE and not f.startswith("doubt") and not f.endswith("_doubt") and not f.startswith("b_")
 
 
 def root(cfg) -> Path:
@@ -41,7 +41,16 @@ def bdir(cfg, b) -> Path:
 def load(cfg):
     items = {it["id"]: it for it in read_jsonl(ddir(cfg) / "items.jsonl")}
     V = read_jsonl(ddir(cfg) / "variants.jsonl")
+    for p in sorted(root(cfg).glob("*/variants2.jsonl")):     # v6: this model's second-stage prompts
+        V += read_jsonl(p)
     return items, V
+
+
+def _grade(items, v, text):
+    if v.get("free"):                                         # published baseline prompts: free-form reply
+        from .design6 import grade_free
+        return grade_free(items[v["item"]], text)
+    return grade(items[v["item"]], text)
 
 
 def _check_items(cfg, b, items):
@@ -88,12 +97,35 @@ def stage_gen(cfg: dict, buckets: list[str]) -> None:
                 for i, r in zip(idx, gen.generate([prompts[i] for i in idx], 1, 0.0, mt, cfg["seed"])):
                     texts[i] = r[0]
             for i in sl:
-                oc, a = grade(items[vb[i]["item"]], texts[i]) if ok[i] else ("SKIP", None)
+                oc, a = _grade(items, vb[i], texts[i]) if ok[i] else ("SKIP", None)
                 rows.append({"vid": vb[i]["vid"], "text": texts.get(i), "answer": a, "outcome": oc})
             done = old + rows
             write_jsonl(out, done)
             print(f"[gen] {b}: {len(rows)}/{len(vb)} saved", flush=True)
         print(f"[gen] {b}: {len(rows)} new prompts {dict(Counter(r['outcome'] for r in rows))}", flush=True)
+
+
+def stage_gen2(cfg: dict, buckets: list[str]) -> None:
+    """v6 second stage: challenges that follow the model's OWN reply to the bare question (only where that reply
+    was correct). The prompts are built here, per model, then generated like any other."""
+    from .design6 import stage2_variants
+    items, _ = load(cfg)
+    for b in buckets:
+        d = bdir(cfg, b)
+        if not (d / "gen.jsonl").exists():
+            print(f"[gen2] {b}: no gen.jsonl yet")
+            continue
+        if not (d / "variants2.jsonl").exists():
+            G = {r["vid"]: r for r in read_jsonl(d / "gen.jsonl")}
+            V2 = []
+            for i, it in items.items():
+                g = G.get(f"{i}|base|base")
+                if it["bucket"] == b and g and g["outcome"] == "GOLD" and g.get("text"):
+                    V2 += stage2_variants(it, g["text"])
+            write_jsonl(d / "variants2.tmp", V2)              # atomic: another GPU's process may be loading prompts
+            (d / "variants2.tmp").replace(d / "variants2.jsonl")
+            print(f"[gen2] {b}: {len(V2)} second-stage prompts from {len(V2) // 3} correct first replies")
+    stage_gen(cfg, buckets)
 
 
 def stage_regrade(cfg: dict, buckets: list[str]) -> None:

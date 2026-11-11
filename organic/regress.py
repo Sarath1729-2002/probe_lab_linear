@@ -1,7 +1,8 @@
 """v5 analysis (CPU): continuous deference and the published replication anchors.
 
 Continuous deference (from score.jsonl, read-only teacher forcing):
-  prior = margin on the bare question; shift = prior - margin with the wrong content (positive = pulled toward it)
+  prior = margin on the bare question; posterior = margin with the wrong content (primary target: below 0 = prefers the
+  planted answer); shift = prior - posterior (secondary: it scales with prior strength, so it is confounded with it)
 Regression probe (Gurnee & Tegmark 2024 style): standardised ridge regression from the last-prompt-token state to
 the shift, layer chosen by grouped CV, reported as grouped out-of-fold R^2 and Spearman; against
   - prior only (how much knowledge strength alone explains),
@@ -85,39 +86,54 @@ def regression(cfg, items, D, sch):
     layers = next(d["acts"]["layers"] for d in D.values() if d["acts"])
     out = {"per_channel": {}, "layers": layers}
     store = {}
-    for c in sch["social"] + sch["info"]:
-        fam = sch["prefix"] + c
+    for c in sch["order"]:
+        fam = sch["fam"][c]
         R = [r for b in D for r in _rows(D, fam, ["wrong"]) if r[0] == b]
         R = [r for r in R if f"{r[2]}|{fam}|wrong" in S and f"{r[2]}|base|base" in S]
         if len(R) < 40:
             out["per_channel"][c] = {"skipped": f"{len(R)} scored rows"}
             continue
         prior = np.array([S[f"{r[2]}|base|base"] for r in R])
-        y = prior - np.array([S[f"{r[2]}|{fam}|wrong"] for r in R])
+        post = np.array([S[f"{r[2]}|{fam}|wrong"] for r in R])
         g = np.array([r[2] for r in R])
         oc = np.array([r[4] for r in R])
         X = _X(D, R, 1)
-        curve = [_r2(y, _oof_ridge(X[:, l].astype(np.float32), y, g, 3, seed)) for l in range(X.shape[1])]
-        li = int(np.nanargmax([c_ if c_ is not None else -9 for c_ in curve]))
-        Xl = X[:, li].astype(np.float32)
-        p = _oof_ridge(Xl, y, g, 5, seed)
-        pp = _oof_linear(prior, y, g, 5, seed)
-        resid = y - pp
-        pr = _oof_ridge(Xl, resid, g, 5, seed)
-        ys = np.random.default_rng(seed).permutation(y)
-        pc = _oof_ridge(Xl, ys, g, 5, seed)
         dh = np.isin(oc, ["WRONG", "GOLD"])
-        r = {"n": len(y), "mean_shift": float(y.mean()), "median_shift": float(np.median(y)),
-             "layer": layers[li], "curve_r2": curve, "r2": _r2(y, p),
-             "spearman": float(spearmanr(y, p, nan_policy="omit")[0]),
-             "prior_only_r2": _r2(y, pp), "partial_r2_beyond_prior": _r2(resid, pr),
-             "control_shuffled_r2": _r2(ys, pc),
-             "shift_predicts_defer_auroc": auc((oc[dh] == "WRONG").astype(int), y[dh]) if len(np.unique(oc[dh])) == 2 else None,
-             "prior_predicts_defer_auroc": auc((oc[dh] == "WRONG").astype(int), -prior[dh]) if len(np.unique(oc[dh])) == 2 else None}
+        zd = (oc[dh] == "WRONG").astype(int)
+        two = len(np.unique(zd)) == 2
+        # primary target: the posterior margin (log-odds correct vs planted WITH the content); it predicts the
+        # generated behaviour directly. Secondary: the shift (prior - posterior), which scales with prior strength.
+        targets = {"posterior": post, "shift": prior - post}
+        r = {"n": len(R), "median_prior": float(np.median(prior)), "median_posterior": float(np.median(post)),
+             "posterior_below_zero": float(np.mean(post < 0)),
+             "posterior_predicts_defer_auroc": auc(zd, -post[dh]) if two else None,
+             "shift_predicts_defer_auroc": auc(zd, (prior - post)[dh]) if two else None,
+             "prior_predicts_defer_auroc": auc(zd, -prior[dh]) if two else None,
+             "corr_prior_shift": float(np.corrcoef(prior, prior - post)[0, 1])}
+        li = None
+        for tname, y in targets.items():
+            if li is None:                                 # layer chosen once, on the primary target
+                curve = [_r2(y, _oof_ridge(X[:, l].astype(np.float32), y, g, 3, seed)) for l in range(X.shape[1])]
+                li = int(np.nanargmax([c_ if c_ is not None else -9 for c_ in curve]))
+            Xl = X[:, li].astype(np.float32)
+            p = _oof_ridge(Xl, y, g, 5, seed)
+            pp = _oof_linear(prior, y, g, 5, seed)
+            resid = y - pp
+            pr = _oof_ridge(Xl, resid, g, 5, seed)
+            ys = np.random.default_rng(seed).permutation(y)
+            pc = _oof_ridge(Xl, ys, g, 5, seed)
+            t = {"layer": layers[li], "curve_r2": curve, "r2": _r2(y, p), "spearman": float(spearmanr(y, p, nan_policy="omit")[0]),
+                 "prior_only_r2": _r2(y, pp), "partial_r2_beyond_prior": _r2(resid, pr), "control_shuffled_r2": _r2(ys, pc),
+                 "probe_predicts_defer_auroc": auc(zd, -p[dh] if tname == "posterior" else p[dh]) if two and not np.isnan(p[dh]).any() else None}
+            if tname == "posterior":
+                r.update(t)
+                store[c] = {"R": R, "y": y, "li": li}
+            else:
+                r["shift"] = t
         out["per_channel"][c] = r
-        store[c] = {"R": R, "y": y, "li": li}
-        print(f"[regress] {c}: R2 {r['r2']:.3f} (prior only {r['prior_only_r2']:.3f}, beyond prior "
-              f"{r['partial_r2_beyond_prior']:.3f}, shuffled {r['control_shuffled_r2']:.3f})", flush=True)
+        print(f"[regress] {c}: posterior R2 {r['r2']:.3f} (prior only {r['prior_only_r2']:.3f}, beyond prior "
+              f"{r['partial_r2_beyond_prior']:.3f}, shuffled {r['control_shuffled_r2']:.3f}); probe -> defer AUROC "
+              f"{r['probe_predicts_defer_auroc']}", flush=True)
     out["transfer"] = _transfer(D, store, layers, seed, sch)
     return out
 
@@ -127,7 +143,7 @@ def _transfer(D, store, layers, seed, sch):
     from sklearn.linear_model import RidgeCV
     from sklearn.pipeline import make_pipeline
     from sklearn.preprocessing import StandardScaler
-    cs = [c for c in sch["social"] + sch["info"] if c in store]
+    cs = [c for c in sch["order"] if c in store]
     if len(cs) < 2:
         return {"skipped": "fewer than two channels"}
     li = int(np.median([store[c]["li"] for c in cs]))
