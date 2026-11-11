@@ -10,7 +10,7 @@ Then the v6 analysis + report are redone (some outcomes change) and REPORT_v61.m
 ## Commands (TamIA)
 
     cd ~/probe_lab_linear
-    tar xzf ~/organic_v61_overlay.tgz
+    tar xzf ~/organic_v61_full.tgz      # the whole organic/ package, not an overlay
     # check the new code is in place (each should print 1 or more)
     grep -c "def stage_extend" organic/run.py
     grep -c "max_tokens_reason" config_organic_v6.yaml

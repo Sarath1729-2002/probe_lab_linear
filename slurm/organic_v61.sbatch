@@ -27,6 +27,8 @@ MODELS="${MODELS:-qwen7b llama8b}"
 STAGES="${STAGES:-gen extend deference report report61}"
 DD=$(python -c "import os,yaml; print(os.path.expandvars(yaml.safe_load(open('$CFG'))['data_dir']))")
 [ -f "$DD/variants.jsonl" ] || { echo "no $DD/variants.jsonl: the v6 run must exist first"; exit 1; }
+python -c "import organic.common, organic.run, organic.design61, organic.deference, organic.report_v6" \
+  || { echo "!! the organic package is incomplete in $(pwd)/organic: unpack organic_v61_full.tgz there"; exit 1; }
 python -m organic.cli variants61 --config $CFG || { echo "!! variants61 failed"; exit 1; }   # appends new prompts once
 mapfile -t SHARDS < <(python -m organic.cli shard --n 2 --config $CFG)
 echo "dataset shards per model: ${SHARDS[0]} | ${SHARDS[1]}"
