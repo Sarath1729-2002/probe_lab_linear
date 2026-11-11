@@ -176,6 +176,7 @@ def main(tiny: str):
     assert r.returncode != 0 and "observation-only" in (r.stderr + r.stdout)
     print((tmp / "reports" / prefix / tags[0] / "REPORT.md").read_text()[:2600])
     print("\nSMOKE ORGANIC v6 OK ->", tmp / "reports" / prefix)
+    return cfg, tmp, tags
 
 
 if __name__ == "__main__":

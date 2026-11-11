@@ -19,7 +19,17 @@ NON_PROBE = ("base", "doubt")          # every other family has wrong / right ve
 
 
 def is_probe_family(f: str) -> bool:
-    return f not in NON_PROBE and not f.startswith("doubt") and not f.endswith("_doubt") and not f.startswith("b_")
+    # v6.1 additions (controls, reason-first) are behavioural only: no activations or scores
+    return (f not in NON_PROBE and not f.startswith("doubt") and not f.endswith("_doubt") and not f.startswith("b_")
+            and not f.startswith("r_") and f not in ("m_bare", "m_key"))
+
+
+def max_tokens(cfg, b, fam) -> int:
+    """Token budget for one prompt: per dataset; reason-first prompts (v6.1) get the larger reasoning budget."""
+    mt = cfg["gen"]["max_tokens"]
+    if fam.startswith("r_") and "max_tokens_reason" in cfg["gen"]:
+        mt = cfg["gen"]["max_tokens_reason"]
+    return mt.get(b, mt["default"])
 
 
 def root(cfg) -> Path:
@@ -81,21 +91,20 @@ def stage_gen(cfg: dict, buckets: list[str]) -> None:
         if gen is None:
             gen = make_generator(cfg, cfg["model"])
         tok = gen.tokenizer
-        mt = cfg["gen"]["max_tokens"].get(b, cfg["gen"]["max_tokens"]["default"])
+        mts = [max_tokens(cfg, b, v["family"]) for v in vb]
         prompts = [render(tok, v)[0] for v in vb]
-        lim = cfg["gen"]["max_model_len"] - mt
-        ok = [len(tok(p, add_special_tokens=False)["input_ids"]) <= lim for p in prompts]
-        idx = [i for i, o in enumerate(ok) if o]
+        ok = [len(tok(p, add_special_tokens=False)["input_ids"]) <= cfg["gen"]["max_model_len"] - m for p, m in zip(prompts, mts)]
         # generate and save in chunks, so a job that hits its time limit keeps what it finished
         chunk = cfg["gen"].get("chunk", 2000)
         rows, done = [], old
         for c0 in range(0, len(vb), chunk):
             sl = range(c0, min(len(vb), c0 + chunk))
-            idx = [i for i in sl if ok[i]]
             texts = {}
-            if idx:
-                for i, r in zip(idx, gen.generate([prompts[i] for i in idx], 1, 0.0, mt, cfg["seed"])):
-                    texts[i] = r[0]
+            for m in sorted({mts[i] for i in sl}):             # one call per token budget
+                idx = [i for i in sl if ok[i] and mts[i] == m]
+                if idx:
+                    for i, r in zip(idx, gen.generate([prompts[i] for i in idx], 1, 0.0, m, cfg["seed"])):
+                        texts[i] = r[0]
             for i in sl:
                 oc, a = _grade(items, vb[i], texts[i]) if ok[i] else ("SKIP", None)
                 rows.append({"vid": vb[i]["vid"], "text": texts.get(i), "answer": a, "outcome": oc})
@@ -103,6 +112,49 @@ def stage_gen(cfg: dict, buckets: list[str]) -> None:
             write_jsonl(out, done)
             print(f"[gen] {b}: {len(rows)}/{len(vb)} saved", flush=True)
         print(f"[gen] {b}: {len(rows)} new prompts {dict(Counter(r['outcome'] for r in rows))}", flush=True)
+
+
+def stage_extend(cfg: dict, buckets: list[str]) -> None:
+    """v6.1: regenerate, with a larger budget, every stored reply that used its whole token budget (any family, same
+    rule for all). Plain greedy generation of the same prompt; the original is kept as text_v0 / outcome_v0e."""
+    items, V = load(cfg)
+    Vd = {v["vid"]: v for v in V}
+    ext = cfg["gen"]["extend_to"]
+    gen = None
+    for b in buckets:
+        p = bdir(cfg, b) / "gen.jsonl"
+        if not p.exists():
+            continue
+        rows = read_jsonl(p)
+        if gen is None:
+            gen = make_generator(cfg, cfg["model"])
+        tok = gen.tokenizer
+        todo = []
+        for k, r in enumerate(rows):
+            v = Vd.get(r["vid"])
+            if v is None or r.get("extended") or r["outcome"] == "SKIP" or not r.get("text"):
+                continue
+            m = max_tokens(cfg, b, v["family"])
+            target = ext.get(b, ext["default"])
+            if target > m and len(tok(r["text"], add_special_tokens=False)["input_ids"]) >= m - 3:
+                todo.append((k, v, target))
+        if not todo:
+            print(f"[extend] {b}: no cut-off replies")
+            continue
+        prompts = [render(tok, v)[0] for _, v, _ in todo]
+        moved = Counter()
+        for m in sorted({x[2] for x in todo}):
+            sel = [j for j, x in enumerate(todo) if x[2] == m]
+            sel = [j for j in sel if len(tok(prompts[j], add_special_tokens=False)["input_ids"]) <= cfg["gen"]["max_model_len"] - m]
+            for j, res in zip(sel, gen.generate([prompts[j] for j in sel], 1, 0.0, m, cfg["seed"])):
+                k, v, _ = todo[j]
+                r = rows[k]
+                oc, a = _grade(items, v, res[0])
+                r.update({"text_v0": r["text"], "outcome_v0e": r["outcome"], "text": res[0], "outcome": oc, "answer": a,
+                          "extended": m})
+                moved[f"{r['outcome_v0e']}->{oc}"] += 1
+        write_jsonl(p, rows)
+        print(f"[extend] {b}: {len(todo)} cut-off replies regenerated {dict(moved)}", flush=True)
 
 
 def stage_gen2(cfg: dict, buckets: list[str]) -> None:

@@ -1,6 +1,7 @@
 # organic_v6: deference against knowledge on established benchmarks. Observation only (see organic/design6.py).
 #   login node (once):  HF_HUB_OFFLINE=0 HF_DATASETS_OFFLINE=0 python -m organic.cli build --config config_organic_v6.yaml
 #   compute:            sbatch slurm/organic_v6.sbatch
+#   v6.1 checks:        sbatch slurm/organic_v61.sbatch   (same run; adds prompts, see organic/design61.py)
 version: 6
 run_prefix: organic_v6
 out_dir: ${SCRATCH}/organic_runs
@@ -30,6 +31,8 @@ gen:
   max_model_len: 6144
   gpu_mem: 0.85
   max_tokens: {default: 384, processbench: 768, bbh: 512}
+  max_tokens_reason: {default: 768, processbench: 1024, bbh: 1024}   # v6.1 reason-first prompts
+  extend_to: {default: 1024, processbench: 1536, bbh: 1536}          # v6.1: budget for replies that were cut off
   chunk: 3000
 
 confidence:

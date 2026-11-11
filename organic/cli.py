@@ -20,7 +20,7 @@ import yaml
 
 from .common import load_config, read_jsonl
 
-STAGES = ["download", "build", "variants", "regrade", "gen", "gen2", "confidence", "extract", "score", "fit", "deference",
+STAGES = ["download", "build", "variants", "variants61", "extend", "report61", "compare61", "regrade", "gen", "gen2", "confidence", "extract", "score", "fit", "deference",
           "traj", "steer", "report", "compare", "shard"]
 
 
@@ -74,6 +74,18 @@ def main():
         elif s == "regrade":
             from .run import stage_regrade
             stage_regrade(cfg, bks)
+        elif s == "variants61":                  # v6.1: append the new prompts to the frozen v6 prompt set
+            from .design61 import stage_variants61
+            stage_variants61(cfg, dd)
+        elif s == "extend":
+            from .run import stage_extend
+            stage_extend(cfg, bks)
+        elif s == "report61":
+            from .design61 import write_report61
+            write_report61(cfg)
+        elif s == "compare61":
+            from .design61 import write_compare61
+            write_compare61(dict(cfg, run_prefix=prefix), [m["tag"] for m in cfg.get("models", [])])
         elif s == "gen2":
             from .run import stage_gen2
             stage_gen2(cfg, bks)
