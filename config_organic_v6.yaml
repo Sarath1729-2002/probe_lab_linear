@@ -46,6 +46,12 @@ extract:
 score:
   batch: 8
 
+hd:                                                  # deference vs honesty (organic/honest_defer.py)
+  n_honesty: 1000                                    # known questions for the honest / deceptive contrast
+  n_per_bucket: 150                                  # known items per dataset for the steering test
+  batch: 48
+  conditions: [none, def_gate, def_uniform, hon_gate, hon_uniform, rand_uniform]
+
 probes:
   layer_step: 2
   n_boot: 300

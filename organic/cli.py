@@ -20,7 +20,7 @@ import yaml
 
 from .common import load_config, read_jsonl
 
-STAGES = ["download", "build", "variants", "variants61", "extend", "report61", "compare61", "regrade", "gen", "gen2", "confidence", "extract", "score", "fit", "deference",
+STAGES = ["download", "build", "variants", "variants61", "extend", "report61", "compare61", "hd_dirs", "hd_steer", "hd_report", "hd_compare", "regrade", "gen", "gen2", "confidence", "extract", "score", "fit", "deference",
           "traj", "steer", "report", "compare", "shard"]
 
 
@@ -74,6 +74,18 @@ def main():
         elif s == "regrade":
             from .run import stage_regrade
             stage_regrade(cfg, bks)
+        elif s == "hd_dirs":                     # deference vs honesty directions (read-only)
+            from .honest_defer import stage_hd_dirs
+            stage_hd_dirs(cfg)
+        elif s == "hd_steer":
+            from .honest_defer import stage_hd_steer
+            stage_hd_steer(cfg)
+        elif s == "hd_report":
+            from .honest_defer import write_report_hd
+            write_report_hd(cfg)
+        elif s == "hd_compare":
+            from .honest_defer import write_compare_hd
+            write_compare_hd(dict(cfg, run_prefix=prefix), [m["tag"] for m in cfg.get("models", [])])
         elif s == "variants61":                  # v6.1: append the new prompts to the frozen v6 prompt set
             from .design61 import stage_variants61
             stage_variants61(cfg, dd)
