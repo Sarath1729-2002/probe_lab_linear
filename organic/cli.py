@@ -20,7 +20,7 @@ import yaml
 
 from .common import load_config, read_jsonl
 
-STAGES = ["download", "build", "variants", "variants61", "extend", "report61", "compare61", "hd_dirs", "hd_steer", "hd_report", "hd_compare", "regrade", "gen", "gen2", "confidence", "extract", "score", "fit", "deference",
+STAGES = ["download", "build", "variants", "variants61", "extend", "report61", "compare61", "hd_dirs", "hd_steer", "hd_report", "hd_compare", "s2_dirs", "s2_calib", "s2_steer", "s2_report", "s2_compare", "regrade", "gen", "gen2", "confidence", "extract", "score", "fit", "deference",
           "traj", "steer", "report", "compare", "shard"]
 
 
@@ -74,6 +74,21 @@ def main():
         elif s == "regrade":
             from .run import stage_regrade
             stage_regrade(cfg, bks)
+        elif s == "s2_dirs":                     # steering v2 (organic/steer2.py)
+            from .steer2 import stage_s2_dirs
+            stage_s2_dirs(cfg)
+        elif s == "s2_calib":
+            from .steer2 import stage_s2_calib
+            stage_s2_calib(cfg)
+        elif s == "s2_steer":
+            from .steer2 import stage_s2_steer
+            stage_s2_steer(cfg)
+        elif s == "s2_report":
+            from .steer2 import write_report_s2
+            write_report_s2(cfg)
+        elif s == "s2_compare":
+            from .steer2 import write_compare_s2
+            write_compare_s2(dict(cfg, run_prefix=prefix), [m["tag"] for m in cfg.get("models", [])])
         elif s == "hd_dirs":                     # deference vs honesty directions (read-only)
             from .honest_defer import stage_hd_dirs
             stage_hd_dirs(cfg)

@@ -52,6 +52,13 @@ hd:                                                  # deference vs honesty (org
   batch: 48
   conditions: [none, def_gate, def_uniform, hon_gate, hon_uniform, rand_uniform]
 
+s2:                                                  # steering v2 (organic/steer2.py)
+  n_per_bucket: 150                                  # held-out known items per dataset for the steering test
+  n_per_bucket_train: 40                             # training-half items per dataset for the gate calibration pass
+  batch: 48
+  gate_quantile: 0.95                                # gate threshold: this quantile of token projections in held replies
+  conditions: [none, ablate, gate, add_0.5, add_1, add_2, rand_2]
+
 probes:
   layer_step: 2
   n_boot: 300
