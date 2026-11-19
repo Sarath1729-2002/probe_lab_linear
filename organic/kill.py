@@ -180,9 +180,10 @@ def stage_k2(cfg: dict) -> dict:
             d = X[tr & y].mean(0) - X[tr & ~y].mean(0)
             s[te] = X[te] @ d
         w, npairs = _within_item_auc(y, s, g)
+        two = lambda m: m.sum() > 10 and y[m].min() != y[m].max()        # both outcomes present in the subset
         row = {"layer": L, "pooled": auc(y, s), "within_item": w, "pairs": npairs,
-               "bare": auc(y[bare], s[bare]) if y[bare].min() != y[bare].max() else None,
-               "reasoned": auc(y[~bare], s[~bare]) if (~bare).sum() and y[~bare].min() != y[~bare].max() else None}
+               "bare": auc(y[bare], s[bare]) if two(bare) else None,
+               "reasoned": auc(y[~bare], s[~bare]) if two(~bare) else None}
         per.append(row)
         if best is None or row["pooled"] > per[best]["pooled"]:
             best, sbest = li, s.copy()
@@ -197,9 +198,10 @@ def stage_k2(cfg: dict) -> dict:
            "margin": {"pooled": auc(y[ok], -margin[ok]), "within_item": _within_item_auc(y[ok], -margin[ok], g[ok])[0],
                       "n": int(ok.sum())}}
 
-    def cv_logit(F):
-        p = np.zeros(ok.sum())
-        yy, gg, ff = y[ok], g[ok], fo[ok]
+    def cv_logit(F, mask=None):
+        mask = ok if mask is None else mask
+        p = np.zeros(mask.sum())
+        yy, gg, ff = y[mask], g[mask], fo[mask]
         for j in range(k):
             tr, te = ff != j, ff == j
             mu, sd = F[tr].mean(0), F[tr].std(0) + 1e-9
@@ -210,6 +212,12 @@ def stage_k2(cfg: dict) -> dict:
     both = cv_logit(np.stack([margin[ok], s[ok]], 1))
     res["probe_beyond_margin"] = {"margin_only": {"pooled": m_only[0], "within_item": m_only[1]},
                                   "margin_plus_probe": {"pooled": both[0], "within_item": both[1]}}
+    allr = np.ones(len(R), bool)
+    p_only = cv_logit(prior[:, None], allr)
+    p_both = cv_logit(np.stack([prior, s], 1), allr)
+    res["probe_beyond_source"] = {"source_only": {"pooled": p_only[0], "within_item": p_only[1]},
+                                  "source_plus_probe": {"pooled": p_both[0], "within_item": p_both[1]}}
+    print(f"[k2] within-item: source {p_only[1]:.3f} -> source+probe {p_both[1]:.3f}; margin {m_only[1]:.3f} -> margin+probe {both[1]:.3f}", flush=True)
     res["at_best_layer"] = per[best]
     json.dump(res, open(kdir(cfg) / "k2.json", "w"), indent=1)
     b = per[best]
@@ -245,6 +253,8 @@ def write_report_kill(cfg: dict) -> Path:
               f"| Pressured margin (model's own output preference) | {f(K['margin']['pooled'])} | {f(K['margin']['within_item'])} |",
               f"| Margin alone, logistic | {f(K['probe_beyond_margin']['margin_only']['pooled'])} | {f(K['probe_beyond_margin']['margin_only']['within_item'])} |",
               f"| Margin + probe, logistic | {f(K['probe_beyond_margin']['margin_plus_probe']['pooled'])} | {f(K['probe_beyond_margin']['margin_plus_probe']['within_item'])} |",
+              f"| Source alone, logistic | {f(K['probe_beyond_source']['source_only']['pooled'])} | {f(K['probe_beyond_source']['source_only']['within_item'])} |",
+              f"| Source + probe, logistic | {f(K['probe_beyond_source']['source_plus_probe']['pooled'])} | {f(K['probe_beyond_source']['source_plus_probe']['within_item'])} |",
               "", f"By reply style at the best layer: bare answer {f(b['bare'])}, reasoned {f(b['reasoned'])}.", "",
               "| Layer | Pooled | Within-item | Bare | Reasoned |", "|---|---|---|---|---|"]
         L += [f"| {p['layer']} | {f(p['pooled'])} | {f(p['within_item'])} | {f(p['bare'])} | {f(p['reasoned'])} |" for p in K["per_layer"]]

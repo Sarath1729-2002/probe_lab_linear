@@ -33,6 +33,14 @@ def main(tiny):
         assert sel and not ({v["item"] for v in sel} & tr) and {v["role"] for v in sel} == {"right"}
         K1 = K.stage_k1(c)
         assert set(K1) == {"m_user", "m_document", "both"} and "gate" in K1["both"]
+        from organic import cgate as CG
+        G = CG.stage_cg_dirs(c)
+        assert 0 <= G["fires"]["known items, correct claim"] <= 1 and G["tau_c"] == G["tau_c"]
+        CG.stage_cg_steer(c)
+        CG.stage_cg_steer(c)                                              # resumable
+        rep = CG.write_report_cg(c).read_text()
+        assert "Conditional gate" in rep and "UNKNOWN" in rep, rep
+        print(rep)
         txt = K.write_report_kill(c).read_text()
         assert "## K1" in txt and "## K2" in txt
         print(txt)
