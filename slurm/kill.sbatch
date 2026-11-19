@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=ep_kill
 #SBATCH --account=aip-oberman
-#SBATCH --gpus-per-node=h100:2          # one GPU per model
-#SBATCH --cpus-per-task=24
+#SBATCH --gpus-per-node=h100:4          # TamIA allocates H100s by whole node; one GPU per model is used
+#SBATCH --cpus-per-task=48
 #SBATCH --mem=0
 #SBATCH --time=02:00:00
 #SBATCH --output=logs/%x-%j.out
