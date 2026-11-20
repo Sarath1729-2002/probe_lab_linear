@@ -157,13 +157,19 @@ def stage_a1(cfg: dict) -> dict:
     for pi, pname in ((1, "last_prompt_token"), (0, "end_of_planted_sentence")):
         per = []
         for li, L in enumerate(layers):
-            X = np.asarray(_X(D, R, pi, li), np.float32)
+            X = np.nan_to_num(np.asarray(_X(D, R, pi, li), np.float32))
             s = _oof_scores("mass_mean", X, y, fo, k, seed)
+            if not np.isfinite(s).all() or s.std() < 1e-9:     # e.g. the embedding layer: same token at every prompt
+                print(f"[a1] {pname} layer {L}: score constant, skipped", flush=True)
+                continue
             per.append({"layer": L, **_decompose(y, s, g, fam, fo, k, seed)})
-            print(f"[a1] {pname} layer {L} mass-mean: pooled {per[-1]['pooled']:.3f} between {per[-1]['between_item']:.3f} "
-                  f"within {per[-1]['within_item']:.3f} (type {per[-1]['pressure_type_within']:.3f}, type+probe "
-                  f"{per[-1]['pressure_type_plus_probe_within']:.3f}); var item {per[-1]['var_item']:.2f}", flush=True)
+            fm = lambda x, n=3: "–" if x is None else f"{x:.{n}f}"
+            print(f"[a1] {pname} layer {L} mass-mean: pooled {fm(per[-1]['pooled'])} between {fm(per[-1]['between_item'])} "
+                  f"within {fm(per[-1]['within_item'])} (type {fm(per[-1]['pressure_type_within'])}, type+probe "
+                  f"{fm(per[-1]['pressure_type_plus_probe_within'])}); var item {fm(per[-1]['var_item'], 2)}", flush=True)
         bi = int(np.argmax([p["pooled"] for p in per]))
+        bi = layers.index(per[bi]["layer"])
+        per_by_layer = {p["layer"]: p for p in per}
         fams = {}
         for li in sorted({max(0, bi - 1), bi, min(len(layers) - 1, bi + 1)}):
             X = np.nan_to_num(np.asarray(_X(D, R, pi, li), np.float32))
@@ -176,8 +182,9 @@ def stage_a1(cfg: dict) -> dict:
                     print(f"[a1] {pname} {name}: FAILED {type(e).__name__}: {e}", flush=True)
                     continue
                 r = fams[name]
-                print(f"[a1] {pname} {name}: pooled {r['pooled']:.3f} between {r['between_item']:.3f} within {r['within_item']:.3f} "
-                      f"(type {r['pressure_type_within']:.3f}, type+probe {r['pressure_type_plus_probe_within']:.3f})", flush=True)
+                fm = lambda x: "–" if x is None else f"{x:.3f}"
+                print(f"[a1] {pname} {name}: pooled {fm(r['pooled'])} between {fm(r['between_item'])} within {fm(r['within_item'])} "
+                      f"(type {fm(r['pressure_type_within'])}, type+probe {fm(r['pressure_type_plus_probe_within'])})", flush=True)
         out["positions"][pname] = {"mass_mean_per_layer": per, "best_layer": layers[bi], "families": fams}
     ok = ~np.isnan(margin)
     out["baselines"] = {"pressured_margin": {"pooled": auc(y[ok], -margin[ok]), "between_item": auc(y[ok], np.array(
