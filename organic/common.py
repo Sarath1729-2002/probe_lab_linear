@@ -69,7 +69,7 @@ def num_equal(a: float | None, b: float | None) -> bool:
 
 def chat(tok, user: str, no_system: bool = False) -> str:
     msgs = [{"role": "user", "content": user}]
-    return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+    return tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True, enable_thinking=False)
 
 
 
@@ -77,7 +77,7 @@ def chat(tok, user: str, no_system: bool = False) -> str:
 def render(tok, v: dict) -> tuple[str, int]:
     """Prompt text for a variant and the char position where its planted information ends."""
     if "messages" in v:
-        p = tok.apply_chat_template(v["messages"], tokenize=False, add_generation_prompt=True)
+        p = tok.apply_chat_template(v["messages"], tokenize=False, add_generation_prompt=True, enable_thinking=False)
         return p, p.rfind(v["info_text"]) + len(v["info_text"])
     p = chat(tok, v["user"])
     return p, p.rfind(v["user"]) + v["info_end"]

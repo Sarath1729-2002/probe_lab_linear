@@ -157,7 +157,7 @@ def stage_a1(cfg: dict) -> dict:
     for pi, pname in ((1, "last_prompt_token"), (0, "end_of_planted_sentence")):
         per = []
         for li, L in enumerate(layers):
-            X = _X(D, R, pi, li)
+            X = np.asarray(_X(D, R, pi, li), np.float32)
             s = _oof_scores("mass_mean", X, y, fo, k, seed)
             per.append({"layer": L, **_decompose(y, s, g, fam, fo, k, seed)})
             print(f"[a1] {pname} layer {L} mass-mean: pooled {per[-1]['pooled']:.3f} between {per[-1]['between_item']:.3f} "
@@ -166,13 +166,15 @@ def stage_a1(cfg: dict) -> dict:
         bi = int(np.argmax([p["pooled"] for p in per]))
         fams = {}
         for li in sorted({max(0, bi - 1), bi, min(len(layers) - 1, bi + 1)}):
-            X = _X(D, R, pi, li)
-            for kind in ("logistic", "mlp", "ridge_margin"):
-                s = _oof_scores(kind, X, y, fo, k, seed, target=margin)
-                fams[f"{kind}@{layers[li]}"] = _decompose(y, s, g, fam, fo, k, seed)
-            s = _paired(X, y, g, fam, fo, k, seed)
-            fams[f"paired@{layers[li]}"] = _decompose(y, s, g, fam, fo, k, seed)
-            for name in (f"logistic@{layers[li]}", f"mlp@{layers[li]}", f"ridge_margin@{layers[li]}", f"paired@{layers[li]}"):
+            X = np.nan_to_num(np.asarray(_X(D, R, pi, li), np.float32))
+            for kind in ("logistic", "mlp", "ridge_margin", "paired"):
+                name = f"{kind}@{layers[li]}"
+                try:                                       # one family failing must not lose the others
+                    s = _paired(X, y, g, fam, fo, k, seed) if kind == "paired" else _oof_scores(kind, X, y, fo, k, seed, target=margin)
+                    fams[name] = _decompose(y, s, g, fam, fo, k, seed)
+                except Exception as e:                     # noqa: BLE001
+                    print(f"[a1] {pname} {name}: FAILED {type(e).__name__}: {e}", flush=True)
+                    continue
                 r = fams[name]
                 print(f"[a1] {pname} {name}: pooled {r['pooled']:.3f} between {r['between_item']:.3f} within {r['within_item']:.3f} "
                       f"(type {r['pressure_type_within']:.3f}, type+probe {r['pressure_type_plus_probe_within']:.3f})", flush=True)
@@ -203,6 +205,9 @@ def stage_a2(cfg: dict) -> dict:
     frag = _fragility(G, known)
     ids = [i for i in known if i in frag]
     p = kdir(cfg) / "base_acts.npy"
+    ix = kdir(cfg) / "base_index.json"
+    if p.exists() and (not ix.exists() or json.load(open(ix)).get("layer") != L):
+        p.unlink()                                          # stored at another layer: read again
     if p.exists():
         H = np.load(p)
         ids = json.load(open(kdir(cfg) / "base_index.json"))["items"]
@@ -224,7 +229,8 @@ def stage_a2(cfg: dict) -> dict:
         json.dump({"items": ids, "layer": L}, open(kdir(cfg) / "base_index.json", "w"))
     f = np.array([frag[i] for i in ids])
     fo = {i: x for i, x in zip(np.unique(g), _folds(np.unique(g), k, seed))}
-    X = _X(D, R, 1, li)
+    X = np.asarray(_X(D, R, 1, li), np.float32)
+    H = np.asarray(H, np.float32)
     s_bare = np.zeros(len(ids))
     s_pres_item = {}
     for j in range(k):
@@ -242,10 +248,10 @@ def stage_a2(cfg: dict) -> dict:
         cp = bdir(cfg, b) / "confidence.jsonl"
         if cp.exists():
             conf.update({r["item"]: r["conf"] for r in read_jsonl(cp)})
-    rob = f == 0
+    rob = f <= 1 / 11 + 1e-9          # flips under at most one of ~11 pressures
     fragile = f >= 0.5
     sel = rob | fragile
-    res = {"layer": L, "n_items": len(ids), "share_robust": float(rob.mean()), "share_fragile": float(fragile.mean()),
+    res = {"layer": L, "n_items": len(ids), "share_robust": float(rob.mean()), "n_robust": int(rob.sum()), "n_fragile": int(fragile.sum()), "share_fragile": float(fragile.mean()),
            "spearman_fragility": {"probe on BARE question": float(spearmanr(s_bare, f)[0]),
                                   "probe on pressured prompts (item mean)": float(spearmanr([s_pres_item.get(i, np.nan) for i in ids], f, nan_policy="omit")[0]),
                                   "sampled confidence": float(spearmanr([-conf.get(i, np.nan) for i in ids], f, nan_policy="omit")[0]),
@@ -255,7 +261,7 @@ def stage_a2(cfg: dict) -> dict:
                                        if all(i in conf for i in np.array(ids)[sel]) else None,
                                        "bare-question margin": auc(fragile[sel], -np.array([M.get(f"{i}|base|base", np.nan) for i in ids])[sel])}}
     json.dump(res, open(kdir(cfg) / "a2.json", "w"), indent=1)
-    print(f"[a2] layer {L}, {len(ids)} items ({100 * rob.mean():.0f}% never flip, {100 * fragile.mean():.0f}% flip under half or more): "
+    print(f"[a2] layer {L}, {len(ids)} items ({100 * rob.mean():.0f}% flip at most once, {100 * fragile.mean():.0f}% flip under half or more): "
           f"Spearman with fragility " + ", ".join(f"{k_} {v:+.3f}" for k_, v in res["spearman_fragility"].items()) +
           "; AUROC fragile vs robust " + ", ".join(f"{k_} {v:.3f}" for k_, v in res["auroc_fragile_vs_robust"].items() if v is not None), flush=True)
     return res
@@ -285,7 +291,7 @@ def write_report_audit(cfg: dict) -> Path:
     if (kdir(cfg) / "a2.json").exists():
         B = json.load(open(kdir(cfg) / "a2.json"))
         L += [f"## KT2: does the monitor fire with no pressure? (layer {B['layer']}, {B['n_items']} items)", "",
-              f"{100 * B['share_robust']:.0f}% of known items never flip under ~11 pressures; {100 * B['share_fragile']:.0f}% flip under half or more.", "",
+              f"{100 * B['share_robust']:.0f}% of known items ({B.get('n_robust')}) flip under at most one of ~11 pressures; {100 * B['share_fragile']:.0f}% flip under half or more.", "",
               "| Score | Spearman with fragility | AUROC fragile vs robust |", "|---|---|---|"]
         for k_ in B["spearman_fragility"]:
             L.append(f"| {k_} | {B['spearman_fragility'][k_]:+.3f} | {f(B['auroc_fragile_vs_robust'].get(k_))} |")
