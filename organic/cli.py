@@ -20,7 +20,7 @@ import yaml
 
 from .common import load_config, read_jsonl
 
-STAGES = ["download", "build", "variants", "variants61", "extend", "report61", "compare61", "hd_dirs", "hd_steer", "hd_report", "hd_compare", "s2_dirs", "s2_calib", "s2_steer", "s2_report", "s2_compare", "k1", "k2", "kill_report", "cg_dirs", "cg_steer", "cg_report", "regrade", "gen", "gen2", "confidence", "extract", "score", "fit", "deference",
+STAGES = ["download", "build", "variants", "variants61", "extend", "report61", "compare61", "hd_dirs", "hd_steer", "hd_report", "hd_compare", "s2_dirs", "s2_calib", "s2_steer", "s2_report", "s2_compare", "k1", "k2", "kill_report", "cg_dirs", "cg_steer", "cg_report", "a1", "a2", "audit_report", "regrade", "gen", "gen2", "confidence", "extract", "score", "fit", "deference",
           "traj", "steer", "report", "compare", "shard"]
 
 
@@ -74,6 +74,15 @@ def main():
         elif s == "regrade":
             from .run import stage_regrade
             stage_regrade(cfg, bks)
+        elif s == "a1":                          # monitor audit (organic/audit.py)
+            from .audit import stage_a1
+            stage_a1(cfg)
+        elif s == "a2":
+            from .audit import stage_a2
+            stage_a2(cfg)
+        elif s == "audit_report":
+            from .audit import write_report_audit
+            write_report_audit(cfg)
         elif s == "cg_dirs":                     # conditional gate (organic/cgate.py)
             from .cgate import stage_cg_dirs
             stage_cg_dirs(cfg)
