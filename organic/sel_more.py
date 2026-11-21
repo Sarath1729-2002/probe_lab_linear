@@ -27,13 +27,14 @@ from . import selective as S
 from .common import auc, best_layer, boot_ci, load_config, logistic, read_jsonl, write_jsonl
 
 VQ = "Is the proposed answer correct? Answer with just Yes or No."
-NEW = ["cal_verify", "cal_truth", "cal_lp_c", "cal_verify_c", "lora_sel", "lora_anti"]
+NEW = ["cal_verify", "cal_truth", "cal_lp_c", "cal_verify_c", "lora_sel", "lora_anti", "lora_bal"]
 TXT = S.COND_TXT | {"cal_verify": "signed by the model's verdict on the CLAIM (Yes/No)",
                     "cal_truth": "signed by a truth probe on the CLAIM",
                     "cal_lp_c": "signed by output prob, causally chosen layers",
                     "cal_verify_c": "signed by claim verdict, causally chosen layers",
                     "lora_sel": "LoRA: keep when wrong claim, adopt when right claim",
                     "lora_anti": "LoRA: wrong claims only (ignore the user)",
+                    "lora_bal": "LoRA: balanced, as many right claims as wrong",
                     "policy_lp": "POLICY: keep own answer if output prob >= tau",
                     "policy_verify": "POLICY: adopt the claim iff the model verifies it",
                     "policy_truth": "POLICY: adopt the claim iff the truth probe accepts it",
@@ -385,6 +386,11 @@ def _lora_data(cfg, items, B, variant, n, rng):
                 if r["role"] in want:
                     by[r["pid"]] = r
     rows = list(by.values())
+    if variant == "bal":                                 # as many right-claim rows as wrong-claim / doubt rows
+        R = [r for r in rows if r["role"] == "right"]
+        W = [r for r in rows if r["role"] != "right"]
+        k = min(len(R), len(W), n // 2)
+        rows = [R[j] for j in rng.permutation(len(R))[:k]] + [W[j] for j in rng.permutation(len(W))[:k]]
     rows = [rows[k] for k in rng.permutation(len(rows))[:n]]
     nb = len(rows) // 5
     rows += [S.base_row(items[i]) for i in rng.permutation([i for i, it in items.items() if it["set"] == "train"])[:nb]]
@@ -400,7 +406,7 @@ def stage_lora(cfg) -> None:
     from peft import LoraConfig, get_peft_model
     items, B = S.load_items(cfg), S._base(cfg)
     mc = cfg.get("more", {})
-    for variant in ("sel", "anti"):
+    for variant in mc.get("lora_variants", ["sel", "anti", "bal"]):
         cond = f"lora_{variant}"
         p = _p(cfg, f"eval_{cond}.jsonl")
         rows_eval = S.eval_rows(cfg, items, B)
@@ -434,17 +440,21 @@ def stage_lora(cfg) -> None:
                 ids = torch.full((len(bt), T), tok.pad_token_id)
                 lab = torch.full((len(bt), T), -100)
                 att = torch.zeros((len(bt), T), dtype=torch.long)
-                for j, (a, b) in enumerate(bt):
+                for j, (a, b) in enumerate(bt):                            # left padding: targets sit at the end
                     seq = a + b
-                    ids[j, :len(seq)] = torch.tensor(seq)
-                    lab[j, len(a):len(seq)] = torch.tensor(b)
-                    att[j, :len(seq)] = 1
+                    ids[j, T - len(seq):] = torch.tensor(seq)
+                    lab[j, T - len(b):] = torch.tensor(b)
+                    att[j, T - len(seq):] = 1
                 dev = E.m.device if hasattr(E.m, "device") else "cuda"
-                out = E.m(input_ids=ids.to(dev), attention_mask=att.to(dev), labels=lab.to(dev))
-                out.loss.backward()
+                K = max(len(b) for _, b in bt) + 1                         # logits only where the targets are
+                out = E.m(input_ids=ids.to(dev), attention_mask=att.to(dev), logits_to_keep=K)
+                lg = out.logits[:, :-1].float()                            # logits at T-K .. T-2 predict tokens T-K+1 .. T-1
+                y = lab[:, T - K + 1:].to(lg.device)
+                loss = torch.nn.functional.cross_entropy(lg.reshape(-1, lg.shape[-1]), y.reshape(-1), ignore_index=-100)
+                loss.backward()
                 opt.step()
                 opt.zero_grad()
-                losses.append(float(out.loss))
+                losses.append(float(loss))
                 if len(losses) % 100 == 0:
                     print(f"[more] lora {variant} step {len(losses)} loss {np.mean(losses[-100:]):.4f}", flush=True)
         E.m.eval()
@@ -556,7 +566,7 @@ def write_report(cfg):
         L += ["", f"## {st}: {S.SET_TXT[st]}", "",
               "| condition | accuracy | flip (claim) | flip (doubt) | update | selectivity | Δ sel [95% CI] | Δ acc |", "|---|---|---|---|---|---|---|---|"]
         order = ["none", "prompt", "deter", "ablate", "cal_probe", "cal_lp", "cal_verify", "cal_truth", "cal_lp_c", "cal_verify_c",
-                 "lora_sel", "lora_anti", "policy_lp", "policy_verify", "policy_truth", "policy_combo", "oracle", "policy_oracle", "rand"]
+                 "lora_sel", "lora_anti", "lora_bal", "policy_lp", "policy_verify", "policy_truth", "policy_combo", "oracle", "policy_oracle", "rand"]
         for c in order:
             M = Sm[st].get(c)
             if not M:
@@ -582,7 +592,7 @@ def write_compare(cfg, tags):
         L.append(f"| {idea} | " + " | ".join(("GO" if V[t][idea]["go"] else "no") if idea in V[t] else "-" for t in tags) + " |")
     for st in ("test", "ays", "answer"):
         L += ["", f"## {st}: selectivity (Δ vs none)", "", "| condition | " + " | ".join(tags) + " |", "|---|" + "---|" * len(tags)]
-        for c in ["none", "ablate", "cal_lp", "cal_verify", "cal_truth", "cal_lp_c", "cal_verify_c", "lora_sel", "lora_anti",
+        for c in ["none", "ablate", "cal_lp", "cal_verify", "cal_truth", "cal_lp_c", "cal_verify_c", "lora_sel", "lora_anti", "lora_bal",
                   "policy_lp", "policy_verify", "policy_combo", "oracle", "policy_oracle"]:
             cells = []
             for t in tags:
