@@ -387,7 +387,7 @@ class Engine:
         for s in range(0, len(texts), self.bs):
             idx = self._order(texts)[s:s + self.bs]
             with self.torch.no_grad():
-                o = self.m(**self._enc([texts[k] for k in idx]), output_hidden_states=True)
+                o = self.m(**self._enc([texts[k] for k in idx]), output_hidden_states=True, logits_to_keep=1)
             H = np.stack([o.hidden_states[L][:, -1].float().cpu().numpy() for L in layers], 1).astype(np.float16)
             if out is None:
                 out = np.zeros((len(texts),) + H.shape[1:], np.float16)
@@ -416,7 +416,7 @@ class Engine:
         for s in range(0, len(tt), self.bs):
             idx = self._order(tt)[s:s + self.bs]
             with self.torch.no_grad():
-                lg = self.m(**self._enc([tt[k] for k in idx])).logits[:, -1].float()
+                lg = self.m(**self._enc([tt[k] for k in idx]), logits_to_keep=1).logits[:, -1].float()
             for j, k in enumerate(idx):
                 ids = self.letter_ids[:n_opts[k]]
                 p = self.torch.softmax(lg[j, ids], 0).cpu().numpy()
@@ -439,9 +439,11 @@ class Engine:
                 ids[j, T - len(seq):] = self.torch.tensor(seq)
                 att[j, T - len(seq):] = 1
             with self.torch.no_grad():
-                lp = self.torch.log_softmax(self.m(input_ids=ids.to(self.m.device), attention_mask=att.to(self.m.device)).logits.float(), -1)
+                K = max(len(c) for c in C) + 1                                   # only the reply positions need logits
+                lp = self.torch.log_softmax(self.m(input_ids=ids.to(self.m.device), attention_mask=att.to(self.m.device),
+                                                   logits_to_keep=K).logits.float(), -1)
             for j, (i, c) in enumerate(zip(idx, C)):
-                pos = np.arange(T - len(c) - 1, T - 1)
+                pos = np.arange(T - len(c) - 1, T - 1) - (T - K)
                 v = lp[j, pos, self.torch.tensor(c)].cpu().numpy()
                 out[i] = float(np.exp(v.mean())) if mean else float(v.sum())
         return out

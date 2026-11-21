@@ -110,6 +110,7 @@ def main(tiny):
     assert "m1" in cmp and ("GO" in cmp or "KILL" in cmp)
     print(cmp)
     print("\nSMOKE SEL OK")
+    return cfg
 
 
 if __name__ == "__main__":
