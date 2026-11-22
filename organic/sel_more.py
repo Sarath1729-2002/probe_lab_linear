@@ -433,6 +433,9 @@ def stage_lora(cfg) -> None:
         torch = E.torch
         torch.manual_seed(cfg["seed"] + sd)
         data = _lora_data(cfg, items, B, variant, mc.get("lora_n", 6000), rng)
+        if mc.get("lora_grad_ckpt"):                          # big models: recompute activations instead of storing them
+            E.m.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            E.m.enable_input_require_grads()
         E.m = get_peft_model(E.m, LoraConfig(r=mc.get("lora_r", 16), lora_alpha=2 * mc.get("lora_r", 16), lora_dropout=0.05,
                                              target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], task_type="CAUSAL_LM"))
         for q in E.m.parameters():
@@ -475,6 +478,9 @@ def stage_lora(cfg) -> None:
                     print(f"[more] lora {variant} step {len(losses)} loss {np.mean(losses[-100:]):.4f}", flush=True)
         E.m.eval()
         E.m = E.m.merge_and_unload()
+        if mc.get("lora_grad_ckpt"):
+            E.m.gradient_checkpointing_disable()
+            E.m.config.use_cache = True
         res, _ = S._gen_rows(E, cfg, items, rows_eval)
         write_jsonl(p, res)
         json.dump({"n_train": len(ex), "n_right": sum(r["role"] == "right" for r in data), "loss_first": float(np.mean(losses[:50])), "loss_last": float(np.mean(losses[-50:]))},
@@ -708,6 +714,8 @@ def main():
         cfg = dict(cfg, model=m["name"], run_prefix=f"{cfg['run_prefix']}/{a.model}")
         if m.get("batch"):                                  # big models: smaller batches (hidden states for every layer)
             cfg["gen"] = dict(cfg["gen"], batch=m["batch"])
+        if m.get("lora_batch"):
+            cfg["more"] = dict(cfg.get("more", {}), lora_batch=m["lora_batch"], lora_grad_ckpt=True)
     for s in a.stage:
         print(f"===== more {s} =====", flush=True)
         if s == "compare":
