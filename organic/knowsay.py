@@ -161,8 +161,9 @@ def nat_rows(it, b, forms=None) -> list[dict]:
 
 def configure(cfg):
     """Select the family set, steering families and output prefix of this run (globals, set once in main)."""
-    global FAMS, STEER_F, PFX, GROUP_F, VARIANTS, AWARE
+    global FAMS, STEER_F, PFX, GROUP_F, VARIANTS, AWARE, STATE_BS
     kc = cfg.get("knowsay", {})
+    STATE_BS = int(kc.get("state_batch", STATE_BS))
     VARIANTS, AWARE = bool(kc.get("readout_variants", False)), bool(kc.get("awareness", False))
     FAMS = list(kc.get("families", FAMS))
     STEER_F = [f for f in kc.get("steer_families", STEER_F) if f in FAMS]
@@ -294,6 +295,17 @@ def group(row, B):
 
 # ----------------------------------------------------------------------------- forward helper
 
+STATE_BS = 16                                    # batch for passes that keep every layer's hidden states (OOM otherwise)
+
+
+def _states(E, texts, layers):
+    bs, E.bs = E.bs, min(E.bs, STATE_BS)
+    try:
+        return E.states(texts, layers)
+    finally:
+        E.bs = bs
+
+
 def _yes_states(E, texts, layers, want_no=False):
     from .sel_more import _yes_ids
     Y, N = _yes_ids(E.tok)
@@ -301,8 +313,9 @@ def _yes_states(E, texts, layers, want_no=False):
     py = np.zeros(len(texts))
     X = None
     order = E._order(texts)
-    for s in range(0, len(texts), E.bs):
-        idx = order[s:s + E.bs]
+    bs = min(E.bs, STATE_BS)
+    for s in range(0, len(texts), bs):
+        idx = order[s:s + bs]
         with torch.no_grad():
             o = E.m(**E._enc([texts[k] for k in idx]), output_hidden_states=True, logits_to_keep=1)
         lg = torch.log_softmax(o.logits[:, -1].float(), -1)
@@ -339,7 +352,7 @@ def stage_gen(cfg) -> None:
         r["claim"] = q["claim"]
     write_jsonl(_p(cfg, "ks_gen.jsonl"), res)
     trm = [k for k, r in enumerate(rows) if items[r["item"]]["set"] == "train"]
-    np.savez(_p(cfg, "ks_press_states.npz"), X=E.states([texts[k] for k in trm], layers),
+    np.savez(_p(cfg, "ks_press_states.npz"), X=_states(E, [texts[k] for k in trm], layers),
              pids=np.array([rows[k]["pid"] for k in trm]), layers=np.array(layers))
     for f in FAMS:
         rr = [r for r in res if r["fam"] == f and items[r["item"]]["set"] == "test" and label(r, B)]
@@ -1032,6 +1045,8 @@ def main():
         cfg = dict(cfg, model=m["name"], run_prefix=f"{cfg['run_prefix']}/{a.model}")
         if m.get("batch"):
             cfg["gen"] = dict(cfg["gen"], batch=m["batch"])
+        if m.get("state_batch"):
+            globals()["STATE_BS"] = int(m["state_batch"])
     for s in a.stage:
         print(f"===== {PFX} {s} =====", flush=True)
         if s == "compare":

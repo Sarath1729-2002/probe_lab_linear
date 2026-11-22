@@ -20,7 +20,7 @@ set +eu
 source ~/errprop_env.sh
 set -u
 export PYTHONPATH="${SLURM_SUBMIT_DIR}:${PYTHONPATH:-}"
-export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1
+export HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 python -c "import organic.knowsay, sklearn" || { echo "!! imports failed"; exit 1; }
 CFG=config_sel_v2.yaml
 R="${SCRATCH}/organic_runs/sel_v2"

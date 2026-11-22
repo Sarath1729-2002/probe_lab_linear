@@ -15,7 +15,7 @@ models:                   # widely used open instruct models; Qwen2.5 3B/7B/14B/
   - {tag: llama8b,   name: meta-llama/Llama-3.1-8B-Instruct}
   - {tag: mistral7b, name: mistralai/Mistral-7B-Instruct-v0.3}
   - {tag: qwen3_8b,  name: Qwen/Qwen3-8B}
-  - {tag: qwen14b,   name: Qwen/Qwen2.5-14B-Instruct, batch: 32, lora_batch: 4}
+  - {tag: qwen14b,   name: Qwen/Qwen2.5-14B-Instruct, batch: 32, lora_batch: 4, state_batch: 8}
   - {tag: qwen3b,    name: Qwen/Qwen2.5-3B-Instruct}
   - {tag: qwen32b,   name: Qwen/Qwen2.5-32B-Instruct, batch: 4}   # honesty study only (no fine-tuning)
   - {tag: llama3b,   name: meta-llama/Llama-3.2-3B-Instruct} # gated like Llama-3.1; skipped if not downloaded
