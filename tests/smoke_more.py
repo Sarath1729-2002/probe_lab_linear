@@ -22,7 +22,8 @@ from organic.common import read_jsonl  # noqa: E402
 
 def main(tiny):
     cfg = smoke_sel.main(tiny)
-    cfg = dict(cfg, more={"n_causal_items": 4, "causal_alpha": 3.0, "lora_n": 24, "lora_batch": 4, "lora_max_len": 256})
+    cfg = dict(cfg, more={"n_causal_items": 4, "causal_alpha": 3.0, "lora_n": 24, "lora_batch": 4, "lora_max_len": 256,
+                          "lora_variants": ["anti", "sel", "mix25", "bal", "bal_s1", "bal_s2", "mix75"]})
     for tag in ("m1", "m2"):
         c = dict(cfg, model=tiny, run_prefix=f"{cfg['run_prefix']}/{tag}")
         M.stage_verify(c)
@@ -46,7 +47,9 @@ def main(tiny):
         for must in ("Verdicts", "## V.", "## C.", "## ays", "policy", "LoRA"):
             assert must in txt, must
         assert set(json.load(open(M._p(c, "verdict_more.json")))) >= {"V checking gap", "G claim gate", "L fine-tune", "C causal layers"}
-    print(M.write_compare(cfg, ["m1", "m2"]).read_text())
+    txt = M.write_compare(cfg, ["m1", "m2", "m3"]).read_text()          # m3 has no results: must be skipped
+    for must in ("frontier", "3 training seeds", "shared geometry", "decode vs layers that steer", "## test"):
+        assert must in txt, must
     print("\nSMOKE MORE OK")
 
 

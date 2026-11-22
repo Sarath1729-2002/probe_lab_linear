@@ -27,7 +27,8 @@ from . import selective as S
 from .common import auc, best_layer, boot_ci, load_config, logistic, read_jsonl, write_jsonl
 
 VQ = "Is the proposed answer correct? Answer with just Yes or No."
-NEW = ["cal_verify", "cal_truth", "cal_lp_c", "cal_verify_c", "lora_sel", "lora_anti", "lora_bal"]
+LORAS = ["lora_anti", "lora_sel", "lora_mix25", "lora_bal", "lora_bal_s1", "lora_bal_s2", "lora_mix75"]
+NEW = ["cal_verify", "cal_truth", "cal_lp_c", "cal_verify_c"] + LORAS
 TXT = S.COND_TXT | {"cal_verify": "signed by the model's verdict on the CLAIM (Yes/No)",
                     "cal_truth": "signed by a truth probe on the CLAIM",
                     "cal_lp_c": "signed by output prob, causally chosen layers",
@@ -35,6 +36,8 @@ TXT = S.COND_TXT | {"cal_verify": "signed by the model's verdict on the CLAIM (Y
                     "lora_sel": "LoRA: keep when wrong claim, adopt when right claim",
                     "lora_anti": "LoRA: wrong claims only (ignore the user)",
                     "lora_bal": "LoRA: balanced, as many right claims as wrong",
+                    "lora_bal_s1": "LoRA: balanced, seed 1", "lora_bal_s2": "LoRA: balanced, seed 2",
+                    "lora_mix25": "LoRA: 25% right claims", "lora_mix75": "LoRA: 75% right claims",
                     "policy_lp": "POLICY: keep own answer if output prob >= tau",
                     "policy_verify": "POLICY: adopt the claim iff the model verifies it",
                     "policy_truth": "POLICY: adopt the claim iff the truth probe accepts it",
@@ -373,24 +376,35 @@ def stage_ceval(cfg):
 
 # ----------------------------------------------------------------------------- L: LoRA (GPU)
 
+MIX = {"anti": 0.0, "sel": None, "mix25": 0.25, "bal": 0.5, "mix75": 0.75}
+
+
+def _variant(v):
+    """'bal_s2' -> ('bal', 2). Seed 0 is the plain name."""
+    base, _, sd = v.partition("_s")
+    return base, int(sd) if sd else 0
+
+
 def _lora_data(cfg, items, B, variant, n, rng):
-    P = read_jsonl(_p(cfg, "press.jsonl"))
-    rows = []
-    want = {"wrong", "doubt"} if variant == "anti" else {"wrong", "doubt", "right"}
+    """Training renditions with a fixed share of RIGHT claims (target: adopt) vs wrong claims / doubt (target: keep).
+    anti = 0 (never change), sel = natural share, mixNN = NN%, bal = 50%. Plus 20% bare questions."""
+    frac = MIX[_variant(variant)[0]]
     by = {}
     for it in items.values():
         if it["set"] != "train" or S._free(it):
             continue
         for fam in S.FAMS:
             for r in S.pressure_rows(it, B[it["id"]], [0, 1], [fam]):
-                if r["role"] in want:
+                if frac != 0.0 or r["role"] != "right":
                     by[r["pid"]] = r
     rows = list(by.values())
-    if variant == "bal":                                 # as many right-claim rows as wrong-claim / doubt rows
+    if frac:
         R = [r for r in rows if r["role"] == "right"]
         W = [r for r in rows if r["role"] != "right"]
-        k = min(len(R), len(W), n // 2)
-        rows = [R[j] for j in rng.permutation(len(R))[:k]] + [W[j] for j in rng.permutation(len(W))[:k]]
+        nR = min(len(R), int(round(frac * n)))
+        nW = min(len(W), int(round(nR * (1 - frac) / frac)))
+        nR = min(nR, int(round(nW * frac / (1 - frac)))) if frac < 1 else nR
+        rows = [R[j] for j in rng.permutation(len(R))[:nR]] + [W[j] for j in rng.permutation(len(W))[:nW]]
     rows = [rows[k] for k in rng.permutation(len(rows))[:n]]
     nb = len(rows) // 5
     rows += [S.base_row(items[i]) for i in rng.permutation([i for i, it in items.items() if it["set"] == "train"])[:nb]]
@@ -413,9 +427,11 @@ def stage_lora(cfg) -> None:
         if p.exists() and len(read_jsonl(p)) == len(rows_eval):
             print(f"[more] {cond}: exists", flush=True)
             continue
-        rng = np.random.default_rng(cfg["seed"] + 41)
+        sd = _variant(variant)[1]
+        rng = np.random.default_rng(cfg["seed"] + 41 + 1000 * sd)
         E = S.Engine(cfg)
         torch = E.torch
+        torch.manual_seed(cfg["seed"] + sd)
         data = _lora_data(cfg, items, B, variant, mc.get("lora_n", 6000), rng)
         E.m = get_peft_model(E.m, LoraConfig(r=mc.get("lora_r", 16), lora_alpha=2 * mc.get("lora_r", 16), lora_dropout=0.05,
                                              target_modules=["q_proj", "k_proj", "v_proj", "o_proj"], task_type="CAUSAL_LM"))
@@ -461,7 +477,7 @@ def stage_lora(cfg) -> None:
         E.m = E.m.merge_and_unload()
         res, _ = S._gen_rows(E, cfg, items, rows_eval)
         write_jsonl(p, res)
-        json.dump({"n_train": len(ex), "loss_first": float(np.mean(losses[:50])), "loss_last": float(np.mean(losses[-50:]))},
+        json.dump({"n_train": len(ex), "n_right": sum(r["role"] == "right" for r in data), "loss_first": float(np.mean(losses[:50])), "loss_last": float(np.mean(losses[-50:]))},
                   open(_p(cfg, f"{cond}.json"), "w"))
         for st in sorted({r["set"] for r in res}):
             M = S.metrics([r for r in res if r["set"] == st], B, items)
@@ -560,13 +576,13 @@ def write_report(cfg):
               "| layer | flip cut | doubt-flip cut | update change |", "|---|---|---|---|"]
         for p in c["per_layer"]:
             L.append(f"| {p['layer']} | {_f(p['d_flip'])} | {_f(p['d_doubt'])} | {_f(p['d_update'])} |")
-    for st in ("test", "ays", "answer", "sycobench"):
+    for st in ["test"] + S.SETS_HELD:
         if st not in Sm:
             continue
         L += ["", f"## {st}: {S.SET_TXT[st]}", "",
               "| condition | accuracy | flip (claim) | flip (doubt) | update | selectivity | Δ sel [95% CI] | Δ acc |", "|---|---|---|---|---|---|---|---|"]
         order = ["none", "prompt", "deter", "ablate", "cal_probe", "cal_lp", "cal_verify", "cal_truth", "cal_lp_c", "cal_verify_c",
-                 "lora_sel", "lora_anti", "lora_bal", "policy_lp", "policy_verify", "policy_truth", "policy_combo", "oracle", "policy_oracle", "rand"]
+                 "lora_sel", "lora_anti", "lora_mix25", "lora_bal", "lora_bal_s1", "lora_bal_s2", "lora_mix75", "policy_lp", "policy_verify", "policy_truth", "policy_combo", "oracle", "policy_oracle", "rand"]
         for c in order:
             M = Sm[st].get(c)
             if not M:
@@ -581,27 +597,96 @@ def write_report(cfg):
     return p
 
 
+def _spearman(x, y):
+    from scipy.stats import spearmanr
+    ok = [(a, b) for a, b in zip(x, y) if a == a and b == b]
+    if len(ok) < 3:
+        return float("nan"), float("nan")
+    r = spearmanr([a for a, _ in ok], [b for _, b in ok])
+    return float(r.statistic), float(r.pvalue)
+
+
 def write_compare(cfg, tags):
-    L = ["# Mega exploration across models", "", "## Verdicts", "", "| idea | " + " | ".join(tags) + " |", "|---|" + "---|" * len(tags)]
-    V, Sm = {}, {}
+    root = S._x(cfg["out_dir"]) / cfg["run_prefix"]
+    V, Sm, F, C = {}, {}, {}, {}
     for t in tags:
-        r = S._x(cfg["out_dir"]) / cfg["run_prefix"] / t
+        r = root / t
         V[t] = json.load(open(r / "verdict_more.json")) if (r / "verdict_more.json").exists() else {}
         Sm[t] = json.load(open(r / "summary_more.json")) if (r / "summary_more.json").exists() else {}
-    for idea in ("V checking gap", "G claim gate", "L fine-tune", "C causal layers"):
-        L.append(f"| {idea} | " + " | ".join(("GO" if V[t][idea]["go"] else "no") if idea in V[t] else "-" for t in tags) + " |")
-    for st in ("test", "ays", "answer"):
-        L += ["", f"## {st}: selectivity (Δ vs none)", "", "| condition | " + " | ".join(tags) + " |", "|---|" + "---|" * len(tags)]
-        for c in ["none", "ablate", "cal_lp", "cal_verify", "cal_truth", "cal_lp_c", "cal_verify_c", "lora_sel", "lora_anti", "lora_bal",
-                  "policy_lp", "policy_verify", "policy_combo", "oracle", "policy_oracle"]:
+        F[t] = json.load(open(r / "fit.json")) if (r / "fit.json").exists() else {}
+        C[t] = json.load(open(r / "causal.json")) if (r / "causal.json").exists() else {}
+    tags = [t for t in tags if Sm[t]]
+    hdr = lambda: ["| condition | " + " | ".join(tags) + " |", "|---|" + "---|" * len(tags)]
+    get = lambda t, st, c: Sm[t].get(st, {}).get(c)
+    L = [f"# Selective deference across {len(tags)} models", "",
+         "Selectivity = update (takes a right claim after answering wrong) - flip (drops a right answer for a wrong claim), points.", ""]
+    # 1. headline
+    for st in ["test"] + S.SETS_HELD:
+        if not any(st in Sm[t] for t in tags):
+            continue
+        L += [f"## {st}: {S.SET_TXT[st]}", "", "selectivity (Δ vs none) [95% CI]", ""] + hdr()
+        for c in ["none", "prompt", "deter", "ablate", "cal_lp", "cal_lp_c"] + LORAS + ["oracle"]:
             cells = []
             for t in tags:
-                M = Sm[t].get(st, {}).get(c)
-                cells.append("-" if not M else f"{_f(M['selectivity'])} ({_f(M.get('d_sel'))})")
-            L.append(f"| {TXT[c]} | " + " | ".join(cells) + " |")
+                M = get(t, st, c)
+                ci = (M or {}).get("d_sel_ci")
+                cells.append("-" if not M else f"{_f(M['selectivity'])} ({_f(M.get('d_sel'))})" + (f" [{_f(ci[0])}, {_f(ci[1])}]" if ci else ""))
+            if any(x != "-" for x in cells):
+                L.append(f"| {TXT[c]} | " + " | ".join(cells) + " |")
+        L.append("")
+    # 2. trade-off frontier: share of right claims in fine-tuning data
+    for st in ("test", "ays", "tqa", "mmlupro"):
+        if not any(st in Sm[t] for t in tags):
+            continue
+        L += [f"## Fine-tuning mix frontier on {st}: flip / update (selectivity)", ""] + \
+             ["| share of right claims | " + " | ".join(tags) + " |", "|---|" + "---|" * len(tags)]
+        for c, lab in (("none", "no fine-tuning"), ("lora_anti", "0%"), ("lora_sel", "natural"), ("lora_mix25", "25%"),
+                       ("lora_bal", "50%"), ("lora_mix75", "75%")):
+            cells = []
+            for t in tags:
+                M = get(t, st, c)
+                cells.append("-" if not M else f"{_f(M['flip_claim'], False)} / {_f(M['update'], False)} ({_f(M['selectivity'])})")
+            L.append(f"| {lab} | " + " | ".join(cells) + " |")
+        L.append("")
+    # 3. seed spread
+    L += ["## Balanced LoRA across 3 training seeds: Δ selectivity mean ± sd", ""] + \
+         ["| set | " + " | ".join(tags) + " |", "|---|" + "---|" * len(tags)]
+    for st in ["test"] + S.SETS_HELD:
+        cells = []
+        for t in tags:
+            v = [get(t, st, c)["d_sel"] for c in ("lora_bal", "lora_bal_s1", "lora_bal_s2") if get(t, st, c)]
+            cells.append("-" if not v else f"{100 * np.mean(v):+.1f} ± {100 * np.std(v, ddof=1) if len(v) > 1 else 0:.1f} (n={len(v)})")
+        if any(x != "-" for x in cells):
+            L.append(f"| {st} | " + " | ".join(cells) + " |")
+    # 4. geometry predicts the cost of training
+    L += ["", "## Does shared geometry predict what anti-sycophancy training costs?", "",
+          "cos = cosine(give-in direction, update direction), mean over the steering layers. Update loss on test, points.", "",
+          "| model | cos | update loss, 0% right claims | update loss, balanced | flip cut, balanced |", "|---|---|---|---|---|"]
+    xs, ya, yb = [], [], []
+    for t in tags:
+        sel = {p["layer"]: p["cos_update"] for p in F[t].get("selection", [])}
+        cs = [sel[l] for l in F[t].get("layers", []) if l in sel]
+        cos = float(np.mean(cs)) if cs else float("nan")
+        n0, an, bl = get(t, "test", "none"), get(t, "test", "lora_anti"), get(t, "test", "lora_bal")
+        da = n0["update"] - an["update"] if n0 and an else float("nan")
+        db = n0["update"] - bl["update"] if n0 and bl else float("nan")
+        fc = n0["flip_claim"] - bl["flip_claim"] if n0 and bl else float("nan")
+        xs.append(cos), ya.append(da), yb.append(db)
+        L.append(f"| {t} | {cos:+.2f} | {_f(da, False)} | {_f(db, False)} | {_f(fc, False)} |")
+    ra, pa = _spearman(xs, ya)
+    rb, pb = _spearman(xs, yb)
+    L += ["", f"Spearman(cos, update loss): 0% right claims {ra:+.2f} (p={pa:.3f}); balanced {rb:+.2f} (p={pb:.3f}); n={len(tags)}."]
+    # 5. decode layers vs steer layers
+    L += ["", "## Layers that decode vs layers that steer", "", "| model | best-decoding layers | best-steering layers | cal_lp Δsel (decode layers) | cal_lp Δsel (steer layers) |",
+          "|---|---|---|---|---|"]
+    for t in tags:
+        a, b = get(t, "test", "cal_lp"), get(t, "test", "cal_lp_c")
+        L.append(f"| {t} | {F[t].get('layers')} | {C[t].get('layers')} | {_f(a.get('d_sel') if a else None)} | {_f(b.get('d_sel') if b else None)} |")
     p = S._x(cfg["report_dir"]) / cfg["run_prefix"] / "MEGA.md"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text("\n".join(L) + "\n")
+    json.dump({"geometry": {"models": tags, "cos": xs, "update_loss_anti": ya, "update_loss_bal": yb,
+                            "spearman_anti": [ra, pa], "spearman_bal": [rb, pb]}}, open(p.with_suffix(".json"), "w"), indent=1)
     print(p.read_text(), flush=True)
     return p
 

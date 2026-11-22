@@ -64,7 +64,7 @@ COND_TXT = {"none": "no intervention", "prompt": "instruction: change only if th
             "deter": "uniform deterrence (subtract a x gap)", "ablate": "directional ablation (projection -> holding mean)",
             "cal_probe": "signed by probe confidence (ours)", "cal_lp": "signed by output probability",
             "oracle": "signed by true baseline correctness (ceiling)", "rand": "random directions, probe-signed (control)"}
-SETS_HELD = ["ays", "answer", "sycobench"]
+SETS_HELD = ["ays", "answer", "mmlupro", "tqa", "sycobench"]
 
 
 # ----------------------------------------------------------------------------- paths
@@ -97,9 +97,9 @@ def _seed(s: str) -> int:
 
 # ----------------------------------------------------------------------------- data (login node)
 
-def _mc(src, q, opts, gold):
+def _mc(src, q, opts, gold, max_opts=5):
     opts = [str(o).strip() for o in opts]
-    if not (2 <= len(opts) <= 5) or not (0 <= int(gold) < len(opts)) or not str(q).strip():
+    if not (2 <= len(opts) <= max_opts) or not (0 <= int(gold) < len(opts)) or not str(q).strip():
         return None
     return {"src": src, "question": str(q).strip(), "options": opts, "gold": int(gold)}
 
@@ -200,6 +200,32 @@ def _sycobench(path) -> list[dict]:
     return out
 
 
+def _mmlupro() -> list[dict]:
+    """MMLU-Pro (TIGER-Lab), up to 10 options: harder, different format. Exact MMLU duplicates are removed later."""
+    from datasets import load_dataset
+    return [r for r in (_mc("mmlupro", x["question"], x["options"], x["answer_index"], max_opts=10)
+                        for x in load_dataset("TIGER-Lab/MMLU-Pro", split="test")) if r]
+
+
+def _tqa_mc1(seed) -> list[dict]:
+    """TruthfulQA MC1 in OUR format (gold + 3 fixed distractors): same questions as Sharma's TruthfulQA items, so
+    ays vs tqa separates format from content."""
+    from datasets import load_dataset
+    out = []
+    for x in load_dataset("truthfulqa/truthful_qa", "multiple_choice", split="validation"):
+        ch, lab = x["mc1_targets"]["choices"], x["mc1_targets"]["labels"]
+        g = lab.index(1)
+        rng = np.random.default_rng(_seed(x["question"]) + seed)
+        others = [k for k in range(len(ch)) if k != g]
+        pick = [g] + [others[k] for k in rng.permutation(len(others))[:3]]
+        order = rng.permutation(len(pick))
+        opts = [ch[pick[k]] for k in order]
+        r = _mc("tqa", x["question"], opts, int(np.where(order == 0)[0][0]))
+        if r:
+            out.append(r)
+    return out
+
+
 def stage_build(cfg) -> dict:
     rng = np.random.default_rng(cfg["seed"])
     src = cfg.get("_synthetic") or _train_sources(cfg)
@@ -216,7 +242,9 @@ def stage_build(cfg) -> dict:
     pa, py = _sharma_files(cfg)
     held = cfg["heldout"]
     for name, rows in (("answer", _sharma_answer(pa)), ("ays", _sharma_ays(py)),
-                       ("sycobench", _sycobench(held["sycobench"]) if held.get("sycobench") else [])):
+                       ("sycobench", _sycobench(held["sycobench"]) if held.get("sycobench") else []),
+                       ("mmlupro", _mmlupro() if held.get("n_mmlupro") else []),
+                       ("tqa", _tqa_mc1(cfg["seed"]) if held.get("n_tqa") else [])):
         rows = [r for r in rows if norm(r["question"]) not in seen]
         k = min(held.get(f"n_{name}", 400), len(rows))
         for i in sorted(rng.permutation(len(rows))[:k].tolist()):
@@ -790,7 +818,7 @@ def stage_alpha(cfg) -> dict:
     E = Engine(cfg)
     w = cfg["sel"].get("acc_weight", 2.0)
     out = {"none": M0, "sweep": {}, "chosen": {}, "n_items": len(val)}
-    for cond in TUNED:
+    for cond in cfg["sel"].get("tuned", TUNED):
         best = None
         for a in cfg["sel"]["alphas"]:
             res, _ = _gen_rows(E, cfg, items, rows, _spec(cfg, F, D, cond, "fit"), _strength(cfg, cond, a, rows, B, items, "fit"))
@@ -890,6 +918,8 @@ def summarize(cfg) -> dict:
 
 
 SET_TXT = {"test": "held-out items + held-out wording (MMLU / ARC / CSQA / OBQA)",
+           "mmlupro": "MMLU-Pro (up to 10 options), our templates",
+           "tqa": "TruthfulQA MC1 in our format (same questions as Sharma's TruthfulQA items)",
            "ays": "Sharma et al. are_you_sure (AQuA + TruthfulQA MC), verbatim + pushback with a claim",
            "answer": "Sharma et al. answer (TriviaQA, free form), verbatim templates",
            "sycobench": "SycoBench-600 items"}

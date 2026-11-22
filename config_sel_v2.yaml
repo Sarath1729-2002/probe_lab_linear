@@ -1,0 +1,60 @@
+# sel_v2, the paper run: 9 models, 5 held-out sets, steering + fine-tuning mix frontier + seeds.
+#   login node (once):  bash slurm/paper_prep.sh
+#   compute:            sbatch slurm/paper.sbatch
+version: sel
+run_prefix: sel_v2
+out_dir: ${SCRATCH}/organic_runs
+data_dir: ${SCRATCH}/sel_data_v2
+report_dir: reports
+seed: 0
+dtype: bfloat16
+
+models:
+  - {tag: qwen7b,    name: Qwen/Qwen2.5-7B-Instruct}
+  - {tag: llama8b,   name: meta-llama/Llama-3.1-8B-Instruct}
+  - {tag: mistral7b, name: mistralai/Mistral-7B-Instruct-v0.3}
+  - {tag: qwen3_8b,  name: Qwen/Qwen3-8B}
+  - {tag: qwen14b,   name: Qwen/Qwen2.5-14B-Instruct}
+  - {tag: qwen3b,    name: Qwen/Qwen2.5-3B-Instruct}
+  - {tag: olmo7b,    name: allenai/OLMo-2-1124-7B-Instruct}
+  - {tag: phi35,     name: microsoft/Phi-3.5-mini-instruct}
+  - {tag: gemma9b,   name: google/gemma-2-9b-it}          # gated: accept the licence on HF first, else it is skipped
+
+train_sources:            # renditions of big MC benchmarks; items split train/test 70/30
+  mmlu: 2000              # cais/mmlu (all subjects, test split)
+  arc: 1200               # allenai/ai2_arc, Challenge + Easy test
+  csqa: 800               # tau/commonsense_qa validation
+  obqa: 500               # allenai/openbookqa test
+test_frac: 0.3
+
+heldout:                  # never used for directions, probes or alphas
+  n_answer: 500           # Sharma et al. sycophancy-eval answer.jsonl, TriviaQA, 4 verbatim templates
+  n_ays: 500              # Sharma et al. are_you_sure.jsonl, AQuA + TruthfulQA MC
+  n_mmlupro: 500          # TIGER-Lab/MMLU-Pro, up to 10 options
+  n_tqa: 500              # TruthfulQA MC1 in our format (format vs content check against ays)
+  sycobench: null         # path to a SycoBench-600 jsonl if you get a copy (question, options, answer)
+sharma_dir: null          # optional local clone of meg-tong/sycophancy-eval/datasets (else HF hub download)
+
+gen:
+  batch: 64
+  max_new_mc: 24
+  max_new_free: 48
+
+sel:
+  n_alpha_items: 600      # validation-half training items for the strength sweep
+  alphas: [0.5, 1, 2, 4]  # strength in units of the give-in vs hold gap
+  acc_weight: 2.0         # alpha objective: selectivity - 2 x (accuracy lost on the bare question)
+  n_boot: 300
+  conds: [none, prompt, deter, ablate, cal_lp]
+  tuned: [deter, cal_lp]
+
+more:
+  n_causal_items: 200
+  causal_alpha: 3.0
+  lora_variants: [anti, sel, mix25, bal, bal_s1, bal_s2, mix75]
+  lora_n: 6000
+  lora_batch: 8
+  lora_lr: 1.0e-4
+  lora_r: 16
+  lora_epochs: 1
+  lora_max_len: 768
