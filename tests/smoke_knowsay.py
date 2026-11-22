@@ -60,6 +60,39 @@ def main(tiny):
         assert {"K1 belief readout transfers", "K5 recovery", "K6 routes differ"} <= set(json.load(open(K._p(c, "ks_verdict.json"))))
     txt = K.write_compare(cfg, ["m1", "m2", "nope"]).read_text()
     assert "Know vs say across 2 models" in txt and "Recovery on departed" in txt
+    # peer-pressure variant (separate prefix, 17 families)
+    cfgp = dict(cfg, knowsay=dict(S.load_config(str(ROOT / "config_sel_v2.yaml"))["knowsay_peer"], n_train_items=40,
+                                  n_steer_known=6, n_steer_unknown=4, min_n=1))
+    K.configure(cfgp)
+    assert K.PFX == "kp" and "floor" in K.FAMS and K.GROUP_F["dose"] == ["peers1", "peers3", "peers6"]
+    c = dict(cfgp, model=tiny, run_prefix=f"{cfg['run_prefix']}/m1")
+    items, B = S.load_items(c), S._base(c)
+    it = next(v for v in items.values() if v["set"] == "test")
+    pr = K.peer_rows(it, {"correct": True, "ans": S.L5[it["gold"]], "text": "(A)"})
+    fams = {r["fam"] for r in pr}
+    assert fams == {f for f in K.PEER_F}, fams ^ set(K.PEER_F)
+    ally = next(r for r in pr if r["fam"] == "peers6_ally")["msgs"][0]["content"]
+    assert ally.count(f"({S.L5[it['gold']]})") >= 1 and "Participant 6" in ally
+    assert next(r for r in pr if r["fam"] == "floor")["msgs"][0]["content"].count("The answer is (") == 6
+    assert "peers6_ally" not in {r["fam"] for r in K.peer_rows(it, {"correct": False, "ans": "Z", "text": "x"})}
+    K.stage_gen(c)
+    G = read_jsonl(K._p(c, "ks_gen.jsonl"))
+    assert K._p(c, "ks_gen.jsonl").name == "kp_gen.jsonl" and {r["fam"] for r in G} >= {"floor", "peers6", "lie"}
+    rng = np.random.default_rng(7)
+    for r in G:
+        r["correct"] = bool(rng.random() < 0.5)
+        r["ans"] = S.L5[items[r["item"]]["gold"]] if r["correct"] else "A"
+    write_jsonl(K._p(c, "ks_gen.jsonl"), G)
+    K.stage_follow(c)
+    Fj = K.stage_fit(c)
+    assert Fj["fams"] == K.FAMS and "peers6" in Fj["departure"]
+    K.stage_steer(c)
+    txt = K.write_report(c).read_text()
+    assert "Behaviour per family" in txt and (S.repdir(c) / "REPORT_knowsay_kp.md").exists()
+    V = json.load(open(K._p(c, "ks_verdict.json")))
+    assert {"P1 dose", "P2 speaker-free floor", "P4 Asch ally", "P5 normative keeps the belief", "P6 publicness"} <= set(V), set(V)
+    txt = K.write_compare(cfgp, ["m1"]).read_text()
+    assert "Departure on known items" in txt and "still knows" in txt
     print(txt[:1500])
     print("\nSMOKE KNOWSAY OK")
 

@@ -62,3 +62,12 @@ more:
 honesty:
   n_steer_items: 400
   n_boot: 300
+
+knowsay_peer:             # peer-pressure run: python -m organic.knowsay <stage> --run knowsay_peer (files kp_*)
+  prefix: kp
+  families: [floor, reask, peers1, peers3, peers6, peers6_self, peers6_ai, peers6_human, peers6_expert, peers6_reason,
+             peers6_ally, public, anon, authorship, sugg, doc, lie]
+  steer_families: [peers6, public, peers6_reason, floor, authorship, lie]
+  n_train_items: 1200
+  n_steer_known: 300
+  n_steer_unknown: 150
