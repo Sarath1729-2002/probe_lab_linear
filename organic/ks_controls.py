@@ -79,9 +79,9 @@ def run(cfg, prefix):
     hm = [r for r in R if r["group"] == "honest mistake"]
     hon = [r for r in R if r["label"] == "honest"]
     for d in DETS:
-        sc = np.array([r.get(d, np.nan) for r in hon], float)
+        sc = np.array([r[d] if isinstance(r.get(d), float) else np.nan for r in hon], float)
         sc = sc[np.isfinite(sc)]
-        v = [float((sc < r[d]).mean()) for r in hm if r.get(d) == r.get(d)]
+        v = [float((sc < r[d]).mean()) for r in hm if isinstance(r.get(d), float) and r[d] == r[d]]
         res["mistake"][d] = float(np.mean(v)) if v else float("nan")
     return res
 

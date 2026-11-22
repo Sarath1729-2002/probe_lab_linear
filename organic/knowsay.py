@@ -714,6 +714,12 @@ def stage_fit(cfg) -> dict:
            "recovery": rec_tab, "route_fams": fams_d, "route_cos": {layers[l]: c for l, c in cos.items()},
            "route_auroc": {f: aucs[f] for f in aucs}, "mus": mus, "thr": thr}
     json.dump(out, open(_p(cfg, "ks_fit.json"), "w"), indent=1)
+    for r in rows:                       # bare replies: post-hoc scores averaged over the per-family models
+        if r["role"] == "base":
+            for det in POSTHOC:
+                v = [x for k, x in r.items() if k.startswith(det + "|") and x == x]
+                if v:
+                    r[det] = float(np.mean(v))
     write_jsonl(_p(cfg, "ks_rows.jsonl"), [{k: v for k, v in r.items() if k not in ("own_k", "opt_k") and "|" not in k} for r in rows])
     held = [f"{f}: {det_tab[f'{f}|belief_cls']['auroc']:.2f}" for f in FAMS if f"{f}|belief_cls" in det_tab]
     print(f"[ks] belief probe layer {layers[li]}; detector AUROC (belief_cls) " + ", ".join(held), flush=True)
