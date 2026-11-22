@@ -1,4 +1,5 @@
-# sel_v2, the paper run: 9 models, 5 held-out sets, steering + fine-tuning mix frontier + seeds.
+# sel_v2, the paper run. Main question: is sycophancy a lie or a change of mind? (organic/honesty.py)
+# Support: selective-deference steering + fine-tuning mix frontier + seeds (selective.py, sel_more.py).
 #   login node (once):  bash slurm/paper_prep.sh
 #   compute:            sbatch slurm/paper.sbatch
 version: sel
@@ -9,16 +10,15 @@ report_dir: reports
 seed: 0
 dtype: bfloat16
 
-models:
+models:                   # widely used open instruct models; Qwen2.5 3B/7B/14B/32B for scale
   - {tag: qwen7b,    name: Qwen/Qwen2.5-7B-Instruct}
   - {tag: llama8b,   name: meta-llama/Llama-3.1-8B-Instruct}
   - {tag: mistral7b, name: mistralai/Mistral-7B-Instruct-v0.3}
   - {tag: qwen3_8b,  name: Qwen/Qwen3-8B}
-  - {tag: qwen14b,   name: Qwen/Qwen2.5-14B-Instruct}
+  - {tag: qwen14b,   name: Qwen/Qwen2.5-14B-Instruct, batch: 32}
   - {tag: qwen3b,    name: Qwen/Qwen2.5-3B-Instruct}
-  - {tag: olmo7b,    name: allenai/OLMo-2-1124-7B-Instruct}
-  - {tag: phi35,     name: microsoft/Phi-3.5-mini-instruct}
-  - {tag: gemma9b,   name: google/gemma-2-9b-it}          # gated: accept the licence on HF first, else it is skipped
+  - {tag: qwen32b,   name: Qwen/Qwen2.5-32B-Instruct, batch: 16}   # honesty study only (no fine-tuning)
+  - {tag: llama3b,   name: meta-llama/Llama-3.2-3B-Instruct} # gated like Llama-3.1; skipped if not downloaded
 
 train_sources:            # renditions of big MC benchmarks; items split train/test 70/30
   mmlu: 2000              # cais/mmlu (all subjects, test split)
@@ -58,3 +58,7 @@ more:
   lora_r: 16
   lora_epochs: 1
   lora_max_len: 768
+
+honesty:
+  n_steer_items: 400
+  n_boot: 300

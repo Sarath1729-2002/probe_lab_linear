@@ -706,6 +706,8 @@ def main():
     if a.model:
         m = next(m for m in cfg["models"] if m["tag"] == a.model)
         cfg = dict(cfg, model=m["name"], run_prefix=f"{cfg['run_prefix']}/{a.model}")
+        if m.get("batch"):                                  # big models: smaller batches (hidden states for every layer)
+            cfg["gen"] = dict(cfg["gen"], batch=m["batch"])
     for s in a.stage:
         print(f"===== more {s} =====", flush=True)
         if s == "compare":

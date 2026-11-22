@@ -1053,6 +1053,8 @@ def main():
         if m is None:
             raise SystemExit(f"unknown --model {a.model}")
         cfg = dict(cfg, model=m["name"], run_prefix=f"{cfg['run_prefix']}/{a.model}")
+        if m.get("batch"):                                  # big models: smaller batches (hidden states for every layer)
+            cfg["gen"] = dict(cfg["gen"], batch=m["batch"])
     for s in a.stage:
         print(f"===== sel {s} =====", flush=True)
         if s == "build":
