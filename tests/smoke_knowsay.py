@@ -93,7 +93,40 @@ def main(tiny):
     assert {"P1 dose", "P2 speaker-free floor", "P4 Asch ally", "P5 normative keeps the belief", "P6 publicness"} <= set(V), set(V)
     txt = K.write_compare(cfgp, ["m1"]).read_text()
     assert "Departure on known items" in txt and "still knows" in txt
-    print(txt[:1500])
+    # natural-form variant (8 forms per process, readout phrasings, test-awareness)
+    cfgn = dict(cfg, knowsay=dict(S.load_config(str(ROOT / "config_sel_v2.yaml"))["knowsay_nat"], n_train_items=40,
+                                  n_steer_known=6, n_steer_unknown=4, min_n=1))
+    K.configure(cfgn)
+    assert K.PFX == "kn" and K.VARIANTS and K.AWARE and "natural" in K.GROUP_F
+    c = dict(cfgn, model=tiny, run_prefix=f"{cfg['run_prefix']}/m1")
+    items, B = S.load_items(c), S._base(c)
+    it = next(v for v in items.values() if v["set"] == "test")
+    allf = K.nat_rows(it, {"correct": True, "ans": S.L5[it["gold"]], "text": "(A)"}, forms=list(range(8)))
+    assert len(allf) == 6 * 8 and len({r["pid"] for r in allf}) == 48
+    for r in allf:
+        txt = r["msgs"][-1]["content"]
+        assert "{" not in txt and S.L5[it["gold"]] not in [x for x in txt.split("(")[1:2]] or r["fam"] == "nat_doubt"
+    assert len(K.nat_rows(it, {"correct": True, "ans": "A", "text": "x"})) == 6
+    K.stage_gen(c)
+    G = read_jsonl(K._p(c, "ks_gen.jsonl"))
+    assert K._p(c, "ks_gen.jsonl").name == "kn_gen.jsonl" and {r["fam"] for r in G} >= {"nat_user", "nat_doubt", "sugg"}
+    rng = np.random.default_rng(9)
+    for r in G:
+        r["correct"] = bool(rng.random() < 0.5)
+        r["ans"] = S.L5[items[r["item"]]["gold"]] if r["correct"] else "A"
+    write_jsonl(K._p(c, "ks_gen.jsonl"), G)
+    K.stage_follow(c)
+    Fo = read_jsonl(K._p(c, "ks_follow.jsonl"))
+    assert {"own_b", "own_c", "test", "gold_b", "dist_c"} <= {r["key"] for r in Fo}
+    Fj = K.stage_fit(c)
+    assert Fj["variants"] and Fj["awareness"] and any(k.startswith("nat_user|") for k in Fj["forms"])
+    K.stage_steer(c)
+    txt = K.write_report(c).read_text()
+    assert "Natural forms" in txt and "Perceived test-ness" in txt and "Readout phrasing" in txt
+    V = json.load(open(K._p(c, "ks_verdict.json")))
+    assert {"R2 not a test artefact", "R3 readout phrasing"} <= set(V), set(V)
+    txt = K.write_compare(cfgn, ["m1"]).read_text()
+    assert "spread across the 8 forms" in txt
     print("\nSMOKE KNOWSAY OK")
 
 

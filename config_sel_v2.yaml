@@ -71,3 +71,13 @@ knowsay_peer:             # peer-pressure run: python -m organic.knowsay <stage>
   n_train_items: 1200
   n_steer_known: 300
   n_steer_unknown: 150
+
+knowsay_nat:              # natural-form run: python -m organic.knowsay <stage> --run knowsay_nat (files kn_*)
+  prefix: kn
+  families: [nat_user, nat_peers, nat_auth, nat_presup, nat_push, nat_doubt, sugg, auth, push, doubt, peers6, lie]
+  steer_families: [nat_user, nat_peers, nat_push, sugg, lie]
+  readout_variants: true  # three phrasings of the readout question
+  awareness: true         # "is this conversation a test?" follow-up on every reply
+  n_train_items: 1200
+  n_steer_known: 300
+  n_steer_unknown: 150
