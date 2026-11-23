@@ -127,6 +127,12 @@ def main(tiny):
     assert {"R2 not a test artefact", "R3 readout phrasing"} <= set(V), set(V)
     txt = K.write_compare(cfgn, ["m1"]).read_text()
     assert "spread across the 8 forms" in txt
+    from organic import ks_review as RV                                 # review answers, on all three runs
+    for pf in ("ks", "kp", "kn"):
+        res = RV.run(dict(cfg, model=tiny, run_prefix=f"{cfg['run_prefix']}/m1"), pf)
+        assert res["strata"] and "oracle" in res["pooled"] and res["persuaded"] and res["recovery"], pf
+        assert pf != "ks" or len(res["cluster"]) == 2, res["cluster"]
+    RV.report({"m1": res}, S.repdir(c) / "REVIEW_smoke.md")
     print("\nSMOKE KNOWSAY OK")
 
 
