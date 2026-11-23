@@ -16,5 +16,5 @@ Fixed by this commit; its hash and time are the timestamp. Nothing below is tune
 
 Confirmation rule (pre-registered 2026-11-22 18:45 ET, unchanged): C1 barereg mean AUROC >= 0.80 and >= verbal + 0.05 and
 >= lie_probe + 0.05 in all of Llama-3.1-8B, Qwen3-8B, Qwen2.5-14B; C2 within 0.03 of loo_sup in at least 2 of 3.
-Known before freezing: on the discovery models C1 holds only on Mistral-7B (margin over verbal 0.04 on Qwen2.5-7B and
-Qwen2.5-3B), so the discovery result itself is mixed; this is reported, not re-thresholded.
+Known before freezing: on the discovery models C1 holds only on Mistral-7B (Qwen2.5-7B: 0.04 over verbal; Qwen2.5-3B:
+0.04 over the lie probe), so the discovery result itself is mixed; this is reported, not re-thresholded.
