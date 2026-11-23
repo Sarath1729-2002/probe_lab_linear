@@ -14,7 +14,7 @@
 #   Phase 2  peer-pressure (kp) and natural-form (kn) runs on Qwen2.5-7B, Mistral-7B, then Llama-3.1-8B
 #   Review 2 same CPU analyses for kp and kn, plus the self-knowledge wall
 #     sbatch --exclude=tg10807 slurm/final.sbatch
-#     REFIT=0 sbatch ...     # resubmission: do not delete the discovery fits again
+#   Stale fits (no post-hoc probes) are detected and refit automatically; resubmitting is always safe.
 set -uo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 mkdir -p logs
@@ -30,11 +30,25 @@ DISC="qwen3b qwen7b mistral7b"
 CONF="llama8b qwen3_8b qwen14b"
 echo "commit $(git rev-parse --short HEAD)   $(date)"
 
-if [ "${REFIT:-1}" = "1" ]; then
-  for t in $DISC; do
-    if [ -f "$R/$t/ks_fit.json" ] && [ ! -f "$R/$t/.refit_done" ]; then rm -f "$R/$t/ks_fit.json"; echo "-- [$t] ks_fit.json removed for refit"; fi
+# stale fits (written before the post-hoc probes, or before post-hoc scores for bare replies) are deleted and refit
+for p in ks kp kn; do
+  for t in $DISC $CONF; do
+    f="$R/$t/${p}_fit.json"; [ -f "$f" ] || continue
+    python - "$f" "$R/$t/${p}_rows.jsonl" <<'PY' || { rm -f "$f"; echo "-- [$p $t] stale fit removed: refit"; }
+import json, sys
+fj = json.load(open(sys.argv[1]))
+ok = "posthoc_layer" in fj
+if ok:
+    ok = False
+    for line in open(sys.argv[2]):
+        r = json.loads(line)
+        if r.get("fam") == "base" and isinstance(r.get("barereg_lofo"), float):
+            ok = True
+            break
+sys.exit(0 if ok else 1)
+PY
   done
-fi
+done
 
 run() {   # run <pfx> <runarg|-> <tag> <gpu> <done-file|-> <stage>
   local p=$1 ra=$2 t=$3 g=$4 done_file=$5 s=$6 log="logs/final-${SLURM_JOB_ID}-$1-$3.log"
@@ -53,7 +67,6 @@ chain() {  # chain <pfx> <runarg|-> <tag> <gpu>
   run "$p" "$ra" "$t" "$g" ${p}_gen.jsonl gen || return 1
   run "$p" "$ra" "$t" "$g" ${p}_follow_states.npz follow || return 1
   run "$p" "$ra" "$t" "$g" ${p}_fit.json fit || return 1
-  [ "$p" = "ks" ] && touch "$R/$t/.refit_done"
   run "$p" "$ra" "$t" "$g" ${p}_steer.json steer
   run "$p" "$ra" "$t" "$g" - report
 }

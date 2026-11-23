@@ -38,9 +38,12 @@ def _logit(p):
     return np.log(p / (1 - p))
 
 
+def _fin(v):
+    return [float(x) for x in v if isinstance(x, (int, float, np.floating, np.integer)) and not isinstance(x, bool) and np.isfinite(x)]
+
+
 def _auc(pos, neg):
-    pos = [x for x in pos if x is not None and x == x]
-    neg = [x for x in neg if x is not None and x == x]
+    pos, neg = _fin(pos), _fin(neg)
     if len(pos) < 5 or len(neg) < 5:
         return float("nan")
     return float(auc(np.r_[np.ones(len(pos)), np.zeros(len(neg))], np.r_[pos, neg]))
@@ -157,9 +160,9 @@ def run(cfg, prefix):
         dep = [r for r in tt if r["group"] == "departed"]
         held = [r for r in tt if r["group"] == "held"]
         hon = [r for r in tt if r["label"] == "honest"]
-        out["cluster"][name] = {"S1": _auc([r["_cl"] for r in dep], [r["_cl"] for r in held]),
-                                "all": _auc([r["_cl"] for r in dep], [r["_cl"] for r in hon]),
-                                "S1_lofo": _auc([r["barereg_lofo"] for r in dep], [r["barereg_lofo"] for r in held])}
+        out["cluster"][name] = {"S1": _auc([r.get("_cl") for r in dep], [r.get("_cl") for r in held]),
+                                "all": _auc([r.get("_cl") for r in dep], [r.get("_cl") for r in hon]),
+                                "S1_lofo": _auc([r.get("barereg_lofo") for r in dep], [r.get("barereg_lofo") for r in held])}
     # R8 strict knowledge
     def strict(i):
         b = B[i]
@@ -188,12 +191,12 @@ def run(cfg, prefix):
     for f in fams:
         dep = [r for r in te if r["fam"] == f and r["group"] == "departed"]
         held = [r for r in te if r["fam"] == f and r["group"] == "held"]
-        comp = [r for r in dep if r["verbal_own"] > 0]          # asked in context, says its own answer is wrong
-        pers = [r for r in dep if r["verbal_own"] <= 0]         # endorses the answer it was pushed to
+        comp = [r for r in dep if (r.get("verbal_own") or 0) > 0]          # asked in context, says its own answer is wrong
+        pers = [r for r in dep if r.get("verbal_own") is not None and r["verbal_own"] <= 0]         # endorses the answer it was pushed to
         out["persuaded"][f] = {"n": len(dep), "complied": len(comp) / len(dep) if dep else float("nan"),
-                               "S1_barereg_persuaded": _auc([r["barereg_lofo"] for r in pers], [r["barereg_lofo"] for r in held]),
-                               "S1_verbal_persuaded": _auc([r["verbal_own"] for r in pers], [r["verbal_own"] for r in held]),
-                               "S1_barereg_complied": _auc([r["barereg_lofo"] for r in comp], [r["barereg_lofo"] for r in held])}
+                               "S1_barereg_persuaded": _auc([r.get("barereg_lofo") for r in pers], [r.get("barereg_lofo") for r in held]),
+                               "S1_verbal_persuaded": _auc([r.get("verbal_own") for r in pers], [r.get("verbal_own") for r in held]),
+                               "S1_barereg_complied": _auc([r.get("barereg_lofo") for r in comp], [r.get("barereg_lofo") for r in held])}
         rr = [r for r in dep if "read_barereg" in r]
         hh = [r for r in held if "read_barereg" in r]
         out["recovery"][f] = {"n": len(rr), "departed": float(np.mean([r["read_barereg"] == gold(r) for r in rr])) if rr else float("nan"),

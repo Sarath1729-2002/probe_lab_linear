@@ -27,11 +27,15 @@ CLAIM = ["sugg", "auth", "push", "doc", "incentive", "peers1", "peers3", "peers6
          "nat_auth", "nat_presup", "nat_push"]
 
 
+def _fin(v):
+    return [float(x) for x in v if isinstance(x, (int, float, np.floating, np.integer)) and not isinstance(x, bool) and np.isfinite(x)]
+
+
 def _auc(pos, neg):
-    pos, neg = [x for x in pos if x == x], [x for x in neg if x == x]
+    pos, neg = _fin(pos), _fin(neg)
     if len(pos) < 5 or len(neg) < 5:
         return float("nan")
-    return auc(np.r_[np.ones(len(pos)), np.zeros(len(neg))], np.r_[pos, neg])
+    return float(auc(np.r_[np.ones(len(pos)), np.zeros(len(neg))], np.r_[pos, neg]))
 
 
 def _boot_diff(P, N, a, b, n=300, seed=0):
